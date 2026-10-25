@@ -21,10 +21,11 @@ nm --size-sort -S -C "$SYM" | awk '
     size = strtonum("0x" $2); name = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", name)
     if (name ~ /^blake3_/)                              c = "BLAKE3 (vendored)"
     else if (name ~ /^LZ4_|^LZ4/)                       c = "LZ4 (vendored)"
+    else if (name ~ /^bk::codec(Encode|Decode)/)        c = "LZ4 (vendored, inlined into bk::codec*)"
+    else if (name ~ /^bk::(cdc|blake3|aead|chunkIdOf|recordSeal|recordOpen)|kGear/) c = "backu hot path (src/, -O2)"
     else if (name ~ /aes256gcm|^gh_|^aes_gcm|^crypto_verify|^sodium_|^expand256|^encrypt|^precomp/) c = "AES-256-GCM (libsodium, vendored)"
-    else if (name ~ /^bk::|^main$/)                     c = "backu (src/)"
+    else if (name ~ /^bk::|^main$/)                     c = "backu cold path (src/, -Oz)"
     else                                                c = "other (crt, runtime glue)"
-    if (name ~ /^bk::.*(kGear)/) c = "backu (src/)"
     sum[c] += size; total += size
 }
 END { for (c in sum) printf "  %-38s %7d\n", c, sum[c]; printf "  %-38s %7d\n", "total attributed", total }' | sort -k1,1

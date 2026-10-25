@@ -55,13 +55,20 @@ echo "== data set: $(du -sh data | cut -f1) in $(find data -type f | wc -l) file
 mbps() { awk -v b="$1" -v s="$2" 'BEGIN { printf "%.0f", b / s / 1048576 }'; }
 timeit() { local t0 t1; t0=$(date +%s.%N); "$@"; t1=$(date +%s.%N); awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }'; }
 
-echo "== create (full)"
-for j in 1 $NPROC; do
+echo "== create (full), thread scaling"
+for j in 1 2 4 8 $NPROC; do
     S=$(timeit sh -c "\"$BACKU\" create --key key --index-out idx-$j -j $j data > full-$j.bk")
     echo "  -j $j: $S s, $(mbps "$TOTAL" "$S") MiB/s, backup $(stat -c %s full-$j.bk) bytes"
 done
 cp idx-$NPROC idx
-rm -f full-1.bk
+rm -f full-1.bk full-2.bk full-4.bk full-8.bk
+
+echo "== increment of the UNCHANGED tree"
+sleep 1.1   # past the files-cache race guard
+S=$(timeit sh -c "\"$BACKU\" create --key key --base idx --index-out idx-u -v data > u.bk 2> u.log")
+echo "  with files cache:    $S s, increment $(stat -c %s u.bk) bytes  ($(grep -o '[0-9]* files read ([^)]*)' u.log))"
+S=$(timeit sh -c "\"$BACKU\" create --key key --base idx --index-out idx-u2 --no-files-cache -v data > u2.bk 2> u2.log")
+echo "  without files cache: $S s, increment $(stat -c %s u2.bk) bytes  ($(grep -o '[0-9]* files read ([^)]*)' u2.log))"
 
 echo "== 1% scattered change"
 # 1% of the bytes: 4 KiB overwrites at random offsets in the big files, a few

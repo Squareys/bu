@@ -6,7 +6,7 @@
 // derive_key context "BLAKE3 2019-12-27 16:29:52 test vectors context"),
 // first 32 bytes of each output. The lengths are picked to hit every dispatch
 // path: below one block, exactly one 1 KiB chunk, one past it, and 100 KiB,
-// which runs the widest SIMD variant (AVX-512 here, AVX2 or SSE4.1 elsewhere).
+// which runs the widest SIMD variant the CPU has (AVX-512, AVX2 or SSE4.1).
 //
 // AES-256-GCM: test cases 13-16 of McGrew & Viega's GCM specification (the
 // NIST-submitted vectors), plus tags for longer messages computed with OpenSSL
