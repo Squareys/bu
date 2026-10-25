@@ -84,3 +84,63 @@ BK_TEST(sqlite_header_detection) {
     h[0] = 's';
     BK_CHECK_EQ(sqliteChunkSize(h, 100), 0u);
 }
+
+BK_TEST(cdc_two_phase_scan_matches_the_reference_definition) {
+    // The pipeline cuts with cdcScan (in parallel segments) + cdcSelect; the
+    // definition is cdcNextCut. Any disagreement would make cut points depend
+    // on thread count or block boundaries, so check both shapes: one window,
+    // and the same data fed as windows with a carried tail, scanned in
+    // arbitrary segments.
+    Array<u8> data;
+    randomFill(data, 3u << 20, 11);
+    Array<u32> ref;
+    cutAll(data.ptr, data.count, ref);
+
+    CdcHits whole;
+    cdcScan(data.ptr, 0, data.count, whole);
+    Array<Cut> cuts;
+    BK_CHECK_EQ(cdcSelect(whole, data.count, true, cuts), data.count);
+    BK_REQUIRE(cuts.count == ref.count);
+    bool same = true;
+    for (u32 i = 0; i < ref.count; ++i) same = same && cuts[i].len == ref[i];
+    BK_CHECK(same);
+
+    // Windowed: 300 KiB of new data per round, tail carried, 3 uneven segments.
+    Array<u32> got;
+    u32 consumed = 0;
+    while (consumed < data.count) {
+        const u32 avail = min<u32>(data.count - consumed, 300u << 10);
+        const bool last = consumed + avail == data.count;
+        // The window is whatever is pending: from `consumed` to the end of this round.
+        const u32 roundEnd = consumed + avail;
+        u32 winStart = consumed;
+        (void)winStart;
+        CdcHits parts[3];
+        const u32 n = roundEnd - consumed;
+        const u32 a = n / 5, b = n / 2;
+        cdcScan(data.ptr + consumed, 0, a, parts[0]);
+        cdcScan(data.ptr + consumed, a, b, parts[1]);
+        cdcScan(data.ptr + consumed, b, n, parts[2]);
+        CdcHits all;
+        for (CdcHits& h : parts) { all.hard.appendRange(h.hard.ptr, h.hard.count); all.easy.appendRange(h.easy.ptr, h.easy.count); }
+        Array<Cut> c;
+        const u32 used = cdcSelect(all, n, last, c);
+        for (const Cut& x : c) got.push(x.len);
+        if (used == 0 && !last) {
+            // Not enough for a maximal chunk yet: widen the next round.
+            const u32 more = min<u32>(data.count - roundEnd, 300u << 10);
+            CdcHits w;
+            cdcScan(data.ptr + consumed, 0, n + more, w);
+            Array<Cut> c2;
+            const u32 used2 = cdcSelect(w, n + more, consumed + n + more == data.count, c2);
+            for (const Cut& x : c2) got.push(x.len);
+            consumed += used2;
+            continue;
+        }
+        consumed += used;
+    }
+    BK_REQUIRE(got.count == ref.count);
+    same = true;
+    for (u32 i = 0; i < ref.count; ++i) same = same && got[i] == ref[i];
+    BK_CHECK(same);
+}

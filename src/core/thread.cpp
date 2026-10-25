@@ -38,6 +38,8 @@ bool Thread::start(void* (*fn)(void*), void* arg) {
 
 void Thread::join() { pthread_join(pthread_t(handle), nullptr); }
 
+void threadSetName(const char* name) { pthread_setname_np(pthread_self(), name); }
+
 u32 cpuCount() {
     const long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n < 1 ? 1u : (n > 1024 ? 1024u : u32(n));
@@ -65,6 +67,7 @@ void* helperMain(void* argp) {
     ThreadPool& p = *arg->pool;
     const u32 worker = arg->worker;
     defaultAllocator().free(arg);
+    threadSetName("backu-pool");
     u64 seen = 0;
     p.mu.lock();
     for (;;) {

@@ -51,6 +51,9 @@ struct Thread {
     void join();
 };
 
+// Name the calling thread (shows in top -H, perf, gdb); `name` never null, <= 15 chars.
+void threadSetName(const char* name);
+
 // Online CPUs (sysconf), at least 1. The default for -j.
 u32 cpuCount();
 

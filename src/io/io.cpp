@@ -7,6 +7,7 @@
 #include <stdio.h>  // rename
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/uio.h>   // writev
 #include <time.h>
 #include <unistd.h>
 
@@ -17,6 +18,18 @@ i64 readFull(int fd, void* buf, usize n) {
     usize got = 0;
     while (got < n) {
         const ssize_t r = ::read(fd, p + got, n - got);
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (r == 0) break;
+        got += usize(r);
+    }
+    return i64(got);
+}
+
+i64 preadUpTo(int fd, void* buf, usize n, u64 off) {
+    u8* p = static_cast<u8*>(buf);
+    usize got = 0;
+    while (got < n) {
+        const ssize_t r = ::pread(fd, p + got, n - got, off_t(off + got));
         if (r < 0) { if (errno == EINTR) continue; return -1; }
         if (r == 0) break;
         got += usize(r);
@@ -70,6 +83,39 @@ void OutStream::write(const void* p, usize n) {
         }
     }
     buf.appendRange(s, u32(n));
+}
+
+static_assert(sizeof(IoSlice) == sizeof(struct iovec), "IoSlice mirrors iovec");
+
+void OutStream::writeVec(const IoSlice* v, u32 n) {
+    usize total = 0;
+    for (u32 i = 0; i < n; ++i) total += v[i].len;
+    written += total;
+    if (failed || total == 0) return;
+    if (!flush()) return;
+    // writev may stop anywhere, including inside a slice; advance through
+    // the slices by what was accepted and retry the rest.
+    struct iovec iov[64];
+    u32 i = 0;
+    usize skip = 0;
+    while (i < n) {
+        u32 k = 0;
+        for (u32 q = i; q < n && k < 64; ++q, ++k) {
+            iov[k].iov_base = const_cast<u8*>(static_cast<const u8*>(v[q].ptr)) + (q == i ? skip : 0);
+            iov[k].iov_len = v[q].len - (q == i ? skip : 0);
+        }
+        ssize_t w = ::writev(fd, iov, int(k));
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            failed = true; savedErrno = errno; return;
+        }
+        while (w > 0 && i < n) {
+            const usize left = v[i].len - skip;
+            if (usize(w) >= left) { w -= ssize_t(left); ++i; skip = 0; }
+            else { skip += usize(w); w = 0; }
+        }
+        while (i < n && v[i].len == 0) ++i;
+    }
 }
 
 bool OutStream::flush() {

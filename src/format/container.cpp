@@ -272,10 +272,14 @@ bool writerBegin(ContainerWriter& w, OutStream& out, const MasterKey& k, String&
     return true;
 }
 
-void writerAddChunk(ContainerWriter& w, const ChunkId& id, u64 nonce, u32 rawLen, const u8* rec, u32 recTotal) {
-    w.out->write(rec, recTotal);
+void writerNoteChunk(ContainerWriter& w, const ChunkId& id, u64 nonce, u32 rawLen, u32 recTotal) {
     TrailerEntry& t = w.chunks.addDefault();
     t.id = id; t.nonce = nonce; t.recLen = recTotal - 4; t.rawLen = rawLen;
+}
+
+void writerAddChunk(ContainerWriter& w, const ChunkId& id, u64 nonce, u32 rawLen, const u8* rec, u32 recTotal) {
+    w.out->write(rec, recTotal);
+    writerNoteChunk(w, id, nonce, rawLen, recTotal);
 }
 
 namespace {

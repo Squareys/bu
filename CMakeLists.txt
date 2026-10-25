@@ -149,7 +149,7 @@ set(BK_COLD_SOURCES
 if(BK_SANITIZE)
     set(BK_COLD_OPT ${BK_OPT_FLAGS})
 else()
-    set(BK_COLD_OPT -Os -DNDEBUG)
+    set(BK_COLD_OPT -Oz -DNDEBUG)
 endif()
 
 add_library(bk_hot OBJECT ${BK_HOT_SOURCES})
@@ -199,3 +199,9 @@ target_include_directories(backu_tests PRIVATE src tests)
 target_compile_options(backu_tests PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})
 target_link_options(backu_tests PRIVATE ${BK_LINK_FLAGS})
 add_test(NAME unit COMMAND backu_tests)
+
+# Primitive throughput (scripts/bench.sh runs it); not part of the test gate.
+add_executable(backu_bench tests/bench.cpp ${BK_OBJECTS})
+target_include_directories(backu_bench PRIVATE src)
+target_compile_options(backu_bench PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})
+target_link_options(backu_bench PRIVATE ${BK_LINK_FLAGS})

@@ -162,6 +162,9 @@ struct ContainerWriter {
 
 // Fresh salt + keys; writes the header.
 [[nodiscard]] bool writerBegin(ContainerWriter& w, OutStream& out, const MasterKey& k, String& err);
+// Record a chunk in the trailer whose sealed record the caller has written
+// to the stream itself (create's writer gathers records with writeVec).
+void writerNoteChunk(ContainerWriter& w, const ChunkId& id, u64 nonce, u32 rawLen, u32 recTotal);
 // Append a sealed chunk record (as produced by recordSeal).
 void writerAddChunk(ContainerWriter& w, const ChunkId& id, u64 nonce, u32 rawLen, const u8* rec, u32 recTotal);
 // Seal and write the manifest body, the trailer and the footer; flush.

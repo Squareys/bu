@@ -16,7 +16,7 @@ u32 codecBound(u32 n) {
     return 5 + (lz > n ? lz : n);
 }
 
-u32 codecEncode(CodecState& st, const u8* raw, u32 n, u8* out, bool compress) {
+BK_HOT u32 codecEncode(CodecState& st, const u8* raw, u32 n, u8* out, bool compress) {
     if (compress && n >= 64) {
         // extState: LZ4 initialises the state we own, so no malloc per call
         // and no 16 KB stack frame per worker. Output capped at n-5 bytes so a
@@ -42,7 +42,7 @@ bool codecRawLength(const u8* enc, u32 n, u32 maxRaw, u32& rawLen) {
     return rawLen <= maxRaw;
 }
 
-bool codecDecode(const u8* enc, u32 n, u8* out, u32 rawLen) {
+BK_HOT bool codecDecode(const u8* enc, u32 n, u8* out, u32 rawLen) {
     if (enc[0] == kCodecStored) {
         if (n - 1 != rawLen) return false;
         memCopy(out, enc + 1, rawLen);

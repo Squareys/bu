@@ -22,11 +22,21 @@ constexpr u32 kOutBlock = 4u << 20;
 
 // Full read; returns bytes read (< n only at EOF) or -1 with errno set.
 i64 readFull(int fd, void* buf, usize n);
+// Positional read of up to n bytes, looping over short reads; returns the
+// bytes read (< n only at end of file) or -1 with errno set.
+i64 preadUpTo(int fd, void* buf, usize n, u64 off);
 // Full positional read; false on error or short read (with `err` filled).
 [[nodiscard]] bool preadFull(int fd, void* buf, usize n, u64 off, String& err);
 // Write all n bytes; false with errno set.
 [[nodiscard]] bool writeAll(int fd, const void* buf, usize n);
 [[nodiscard]] bool pwriteAll(int fd, const void* buf, usize n, u64 off);
+
+// Layout-compatible with struct iovec (io.cpp static_asserts it), so callers
+// need not include <sys/uio.h>.
+struct IoSlice {
+    const void* ptr;
+    usize len;
+};
 
 struct OutStream {
     int fd = -1;
@@ -37,6 +47,9 @@ struct OutStream {
 
     void init(int outFd) { fd = outFd; buf.reserve(kOutBlock); buf.count = 0; }
     void write(const void* p, usize n);
+    // Gather-write straight from the callers' buffers (writev): records go
+    // from the workers' slots to the fd with no copy into `buf`.
+    void writeVec(const IoSlice* v, u32 n);
     // Flush the buffer; false if any write so far failed (errno in savedErrno).
     [[nodiscard]] bool flush();
 };

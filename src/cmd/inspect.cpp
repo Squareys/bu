@@ -224,9 +224,22 @@ int cmdList(int argc, char** argv, int first) {
         hexEncode(chain.files[i].keys.salt, 8, salt);
         salt[16] = 0;
         fmtTime(h.createdNs, when, sizeof when);
-        printf("# %s: backup %s, snapshot %s, parent %s, generation %llu, created %s, %u chunk records%s\n",
+        // A digest of the chunk table (IDs, record and raw lengths, nonces, in
+        // file order): two backups of the same tree under the same key have
+        // the same one whatever -j was, which is how the tests check that the
+        // output does not depend on thread scheduling.
+        ByteWriter t;
+        for (const ChunkLoc& l : chain.files[i].chunks) {
+            t.bytes(l.id.b, kIdBytes); t.varint(l.recLen); t.varint(l.rawLen); t.varint(l.nonce);
+        }
+        u8 digest[32];
+        blake3Hash(t.buf.ptr, t.buf.count, digest);
+        char dhex[17];
+        hexEncode(digest, 8, dhex);
+        dhex[16] = 0;
+        printf("# %s: backup %s, snapshot %s, parent %s, generation %llu, created %s, %u chunk records (table %s)%s\n",
                chain.files[i].path.c_str(), salt, label, parent, (unsigned long long)h.gen, when,
-               chain.files[i].chunks.count, i == latest ? "  <- latest" : "");
+               chain.files[i].chunks.count, dhex, i == latest ? "  <- latest" : "");
     }
     if (!chainResolve(chain, latest, err)) { report(err); return kExitRuntime; }
     printEntries(chain.snaps[latest].snap);

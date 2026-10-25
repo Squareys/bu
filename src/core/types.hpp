@@ -36,6 +36,14 @@ static_assert(sizeof(usize) == 8 && sizeof(uptr) == 8,
 // reallocation; indices survive growth and serialize cleanly).
 constexpr u32 kInvalidIndex = 0xFFFFFFFFu;
 
+// The boundary between hot and cold code. Cold TUs are built -Oz and hot ones
+// -O2 (CMakeLists.txt), and under LTO a function inlined into a caller is
+// compiled with the CALLER's attributes — so a per-byte loop inlined into an
+// -Oz command handler silently becomes size-optimised. It happened: the CDC
+// scan ran at half speed until its entry point was marked. Every hot entry
+// point called from cold code carries BK_HOT.
+#define BK_HOT __attribute__((noinline))
+
 // Branch hints — cheap and free of header cost.
 #define BK_LIKELY(x)   (__builtin_expect(!!(x), 1))
 #define BK_UNLIKELY(x) (__builtin_expect(!!(x), 0))

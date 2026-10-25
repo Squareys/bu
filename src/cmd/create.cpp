@@ -9,10 +9,11 @@
 //                       kBlocks reused buffers; posix_fadvise SEQUENTIAL before
 //                       and DONTNEED after each file; O_NOATIME when allowed;
 //                       openat relative to a cached directory fd.
-//   chunker (1 thread)  copies each block behind the unconsumed tail of the
-//                       previous one and cuts chunks (FastCDC or SQLite pages)
-//                       into job slots, numbering them 0, 1, 2, ...
-//   workers (-j N)      per job: keyed-BLAKE3 ID, dedupe lookup, LZ4, AES-GCM.
+//   chunker (1 thread)  moves the previous block's short tail in front of the
+//                       new block and cuts chunks (FastCDC or SQLite pages),
+//                       numbering them 0, 1, 2, ...; jobs point INTO the block.
+//   workers (-j N)      per job: keyed-BLAKE3 ID, dedupe lookup, LZ4, AES-GCM,
+//                       reading the chunk where the reader put it.
 //   writer (main)       takes jobs strictly in sequence order and writes them.
 //
 // DETERMINISM. A chunk's sequence number is its nonce, assigned by the
@@ -58,8 +59,8 @@ namespace bk {
 
 namespace {
 
-constexpr u32 kReadBlock = 4u << 20;   // one read() per 4 MiB: syscall cost vanishes, readahead stays fed
-constexpr u32 kBlocks = 4;             // reader may run 3 blocks ahead of the chunker
+constexpr u32 kReadBlock = 1u << 20;   // one read() per MiB: syscall cost vanishes, and a block stays cache-resident until workers are done with it
+constexpr u32 kBlocks = 12;            // 12 MiB in flight: readers run ahead while workers still read older blocks
 constexpr i64 kRaceGuardNs = 1000000000;
 
 // ---- the walk ---------------------------------------------------------------
@@ -221,17 +222,34 @@ bool storedName(StringView p, String& out) {
 
 constexpr u8 kBlockFirst = 1, kBlockLast = 2, kBlockError = 4;
 
-struct BlockMeta { u32 item; u32 len; u8 flags; };
+// A read buffer: kMaxChunk bytes of headroom, then kReadBlock bytes of data.
+// The chunker moves the unconsumed tail of the previous block (always shorter
+// than one maximal chunk) into the headroom right before this block's data,
+// so every chunk lies contiguous inside exactly one buffer and workers hash
+// and compress straight out of it: the pipeline copies no file data.
+constexpr u8 kBlockFree = 0, kBlockReading = 1, kBlockReady = 2, kBlockChunking = 3, kBlockDraining = 4;
+
+struct Block {
+    u8* mem = nullptr;     // kMaxChunk headroom + kReadBlock data
+    u32 item = 0;
+    u32 len = 0;           // data bytes after the headroom
+    u8 flags = 0;
+    u8 state = kBlockFree; // under mu
+    u32 refs = 0;          // jobs still reading from this block, under mu
+    CdcHits hits;          // CDC candidates in [0, len), block-relative (phase 1)
+    u8* data() const { return mem + kMaxChunk; }
+};
 
 struct Job {
-    u8* raw = nullptr;     // kMaxChunk
-    u8* rec = nullptr;     // sealed record
+    const u8* raw = nullptr;   // inside blocks[block]
+    u8* rec = nullptr;         // sealed record (slot-owned buffer)
     u64 seq = 0;
+    u32 block = 0;
     u32 item = 0;
     u32 rawLen = 0;
-    u32 recLen = 0;        // 0: duplicate, nothing to write
+    u32 recLen = 0;            // 0: duplicate, nothing to write
     ChunkId id;
-    u8 state = 0;          // 0 free, 1 queued, 2 done
+    u8 state = 0;
 };
 
 constexpr u8 kJobFree = 0, kJobQueued = 1, kJobDone = 2;
@@ -245,11 +263,14 @@ struct Pipe {
     Cond readerCv, chunkerCv, workerCv, writerCv;
     bool abort = false;
 
-    // reader -> chunker
-    u8* bufs[kBlocks] = {};
-    BlockMeta meta[kBlocks];
+    // readers -> chunker. Readers claim (file, offset) ranges in order, each
+    // with the next ring slot, and fill them concurrently; the chunker takes
+    // slots strictly in ring order, so file order is preserved.
+    Block blocks[kBlocks];
     u32 blockHead = 0, blockTail = 0;
-    bool readerDone = false;
+    u32 claimItem = 0;         // next read item to claim from
+    u64 claimOffset = 0;       // next offset in it
+    u32 readersRunning = 0;
 
     // chunker -> workers -> writer
     Job* jobs = nullptr;
@@ -264,10 +285,11 @@ struct Pipe {
     HashIndex committed;
     Array<ChunkId> committedIds;
 
-    // per read item, written by the chunker, read after join
-    Array<u64> itemBytes;
-    Array<u8> itemFailed;
-    u32 readWarnings = 0;    // under mu
+    // per read item
+    Array<u64> itemBytes;      // chunker only, read after join
+    Array<u8> itemFailed;      // under mu
+    Array<u8> itemShrunk;      // under mu
+    u32 readWarnings = 0;      // under mu
 };
 
 bool setContains(const HashIndex& idx, const Array<ChunkId>& ids, const ChunkId& id) {
@@ -277,169 +299,264 @@ bool setContains(const HashIndex& idx, const Array<ChunkId>& ids, const ChunkId&
     return false;
 }
 
-void readWarn(Pipe& p, StringView path, StringView what) {
-    Lock l(p.mu);
+void readWarnLocked(Pipe& p, StringView path, StringView what) {
     fprintf(stderr, "backu: warning: %.*s: %.*s\n", int(path.count), path.ptr, int(what.count), what.ptr);
     ++p.readWarnings;
 }
 
-// Reserve the next block buffer; null on abort.
-u8* acquireBlock(Pipe& p, u32& slot) {
-    Lock l(p.mu);
-    while (p.blockHead - p.blockTail == kBlocks && !p.abort) p.readerCv.wait(p.mu);
-    if (p.abort) return nullptr;
-    slot = p.blockHead % kBlocks;
-    return p.bufs[slot];
+// Chunker or last worker lets go of a block: free once nobody reads it.
+// Called with mu held.
+void releaseBlockLocked(Pipe& p, Block& b) {
+    if (b.refs == 0) { b.state = kBlockFree; p.readerCv.broadcast(); }
+    else b.state = kBlockDraining;
 }
 
-void publishBlock(Pipe& p, u32 item, u32 len, u8 flags) {
-    Lock l(p.mu);
-    BlockMeta& m = p.meta[p.blockHead % kBlocks];
-    m.item = item; m.len = len; m.flags = flags;
-    ++p.blockHead;
-    p.chunkerCv.broadcast();
-}
-
-void* readerMain(void* arg) {
-    Pipe& p = *static_cast<Pipe*>(arg);
-    const Walk& w = *p.walk;
+// One reader's open file, kept across consecutive claims of the same item.
+struct ReaderFd {
+    u32 item = kInvalidIndex;
+    int fd = -1;
     String dirPath;
     int dirFd = -1;
     bool noatime = true;
-    for (u32 it = 0; it < w.reads.count; ++it) {
-        const ReadItem& r = w.reads[it];
-        const StringView fs(w.fsPaths.ptr + r.fsOff, r.fsLen);
-        // openat relative to a cached directory fd: consecutive files share a
-        // directory (the walk is depth-first), so the kernel resolves the
-        // directory path once per directory instead of once per file.
-        const u32 slash = fs.findLast('/');
-        const StringView dir = slash == kInvalidIndex ? "."_s : (slash == 0 ? "/"_s : fs.first(slash));
-        const String name(fs.from(slash == kInvalidIndex ? 0 : slash + 1));
-        if (dirFd < 0 || !(dirPath.view() == dir)) {
-            if (dirFd >= 0) close(dirFd);
-            dirPath.assign(dir);
-            dirFd = open(dirPath.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
-        }
-        int fd = -1;
-        if (dirFd >= 0) {
-            // O_NOATIME: reading for a backup must not dirty every inode's
-            // atime. Only the owner (or CAP_FOWNER) may ask; on EPERM drop it
-            // for the rest of the run rather than paying a failed open per file.
-            const int base = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
-            fd = openat(dirFd, name.c_str(), base | (noatime ? O_NOATIME : 0));
-            if (fd < 0 && errno == EPERM && noatime) { noatime = false; fd = openat(dirFd, name.c_str(), base); }
-        }
-        struct stat st;
-        if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-            readWarn(p, fs, fd < 0 ? StringView(strerror(errno)) : "no longer a regular file; skipped"_s);
-            if (fd >= 0) close(fd);
-            u32 slot;
-            if (!acquireBlock(p, slot)) break;
-            publishBlock(p, it, 0, kBlockFirst | kBlockLast | kBlockError);
-            continue;
-        }
-        posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-        u8 flags = kBlockFirst;
-        for (;;) {
-            u32 slot;
-            u8* buf = acquireBlock(p, slot);
-            if (!buf) break;
-            const i64 n = readFull(fd, buf, kReadBlock);
-            if (n < 0) {
-                readWarn(p, fs, StringView(strerror(errno)));
-                publishBlock(p, it, 0, flags | kBlockLast | kBlockError);
-                break;
-            }
-            const bool last = u64(n) < kReadBlock;
-            publishBlock(p, it, u32(n), flags | (last ? kBlockLast : 0));
-            flags = 0;
-            if (last) break;
-        }
-        // Done with this file: tell the kernel its pages need not stay cached,
-        // so backing up 10 GB does not evict the working set of everything
-        // else on the machine.
-        posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
-        close(fd);
-        Lock l(p.mu);
-        if (p.abort) break;
+
+    ~ReaderFd() { closeFile(); if (dirFd >= 0) close(dirFd); }
+    void closeFile() { if (fd >= 0) close(fd); fd = -1; item = kInvalidIndex; }
+};
+
+// Open read item `it` (relative to a cached directory fd). -1 with errno set.
+int openItem(ReaderFd& r, const Walk& w, u32 it) {
+    if (r.item == it) return r.fd;
+    r.closeFile();
+    const ReadItem& ri = w.reads[it];
+    const StringView fs(w.fsPaths.ptr + ri.fsOff, ri.fsLen);
+    const u32 slash = fs.findLast('/');
+    const StringView dir = slash == kInvalidIndex ? "."_s : (slash == 0 ? "/"_s : fs.first(slash));
+    const String name(fs.from(slash == kInvalidIndex ? 0 : slash + 1));
+    // Consecutive files share a directory (the walk is depth-first), so the
+    // kernel resolves the directory path once per directory, not per file.
+    if (r.dirFd < 0 || !(r.dirPath.view() == dir)) {
+        if (r.dirFd >= 0) close(r.dirFd);
+        r.dirPath.assign(dir);
+        r.dirFd = open(r.dirPath.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+        if (r.dirFd < 0) return -1;
     }
-    if (dirFd >= 0) close(dirFd);
+    // O_NOATIME: reading for a backup must not dirty every inode's atime.
+    // Only the owner (or CAP_FOWNER) may ask; after one EPERM, stop asking.
+    const int base = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
+    int fd = openat(r.dirFd, name.c_str(), base | (r.noatime ? O_NOATIME : 0));
+    if (fd < 0 && errno == EPERM && r.noatime) { r.noatime = false; fd = openat(r.dirFd, name.c_str(), base); }
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); errno = EINVAL; return -1; }
+    posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+    r.fd = fd;
+    r.item = it;
+    return fd;
+}
+
+// The readers. Each claims the next kReadBlock range of the walk's file list
+// (sizes as the walk saw them — the backup is of the tree as walked) together
+// with the next ring slot, preads it — plus the 63 bytes before it, which the
+// CDC hash needs to warm up — runs CDC phase 1 over it while it is hot in
+// cache, and marks it ready. Several readers means several reads in flight
+// (NVMe wants queue depth; many small files want their open/stat latencies
+// overlapped) and a CDC scan that keeps up with any number of workers.
+void* readerMain(void* arg) {
+    Pipe& p = *static_cast<Pipe*>(arg);
+    threadSetName("backu-reader");
+    const Walk& w = *p.walk;
+    ReaderFd rf;
+    for (;;) {
+        u32 bi, item;
+        u64 off;
+        u32 len;
+        u8 flags;
+        {
+            Lock l(p.mu);
+            for (;;) {
+                if (p.abort || p.claimItem >= w.reads.count) { bi = kInvalidIndex; break; }
+                bi = p.blockHead % kBlocks;
+                if (p.blocks[bi].state == kBlockFree) break;
+                p.readerCv.wait(p.mu);
+            }
+            if (bi == kInvalidIndex) break;
+            item = p.claimItem;
+            const u64 size = w.snap.entries[w.reads[item].entry].size;
+            off = p.claimOffset;
+            len = u32(min<u64>(kReadBlock, size - off));
+            flags = u8((off == 0 ? kBlockFirst : 0) | (off + len >= size ? kBlockLast : 0));
+            if (flags & kBlockLast) { ++p.claimItem; p.claimOffset = 0; }
+            else p.claimOffset = off + len;
+            Block& b = p.blocks[bi];
+            b.state = kBlockReading;
+            b.item = item;
+            ++p.blockHead;
+        }
+        Block& b = p.blocks[bi];
+        b.hits.hard.clear();
+        b.hits.easy.clear();
+        u32 got = 0;
+        bool failed = false, shrunk = false;
+        int err = 0;
+        if (len) {
+            const int fd = openItem(rf, w, item);
+            if (fd < 0) { failed = true; err = errno; }
+            else {
+                // Read the warm-up bytes with the block: one syscall, and the
+                // scan then needs nothing from the previous block's buffer.
+                const u32 warm = u32(min<u64>(off, 63));
+                const i64 n = preadUpTo(fd, b.data() - warm, len + warm, off - warm);
+                if (n < 0) { failed = true; err = errno; }
+                else {
+                    got = n > i64(warm) ? u32(n) - warm : 0;
+                    if (got < len) shrunk = true;       // truncated under us
+                    if (got) cdcScanWarm(b.data(), warm, got, b.hits);
+                    // Read and done with: drop it from the page cache, so a
+                    // 10 GB backup does not evict everybody else's working set.
+                    posix_fadvise(fd, off_t(off), off_t(len), POSIX_FADV_DONTNEED);
+                }
+            }
+        }
+        if (flags & kBlockLast) rf.closeFile();
+        Lock l(p.mu);
+        if (failed || shrunk) {
+            const ReadItem& ri = w.reads[item];
+            const StringView fs(w.fsPaths.ptr + ri.fsOff, ri.fsLen);
+            if (failed && !p.itemFailed[item]) readWarnLocked(p, fs, StringView(strerror(err)));
+            if (shrunk && !failed && !p.itemShrunk[item]) readWarnLocked(p, fs, "shrank while being read; stored what was there"_s);
+            if (failed) p.itemFailed[item] = 1;
+            if (shrunk) p.itemShrunk[item] = 1;
+        }
+        b.len = got;
+        b.flags = u8(flags | (failed ? kBlockError : 0));
+        b.state = kBlockReady;
+        p.chunkerCv.broadcast();
+    }
     Lock l(p.mu);
-    p.readerDone = true;
+    --p.readersRunning;
     p.chunkerCv.broadcast();
     return nullptr;
 }
 
-// Hand one chunk to the workers; false on abort.
-bool emitJob(Pipe& p, u32 item, const u8* data, u32 n) {
-    Job* j;
-    {
+// Queue the cuts of one window for the workers, as many per lock round as
+// there are free slots; false on abort.
+bool emitJobs(Pipe& p, u32 blockIdx, u32 item, const u8* base, const Array<Cut>& cuts) {
+    Block& b = p.blocks[blockIdx];
+    u32 k = 0;
+    while (k < cuts.count) {
         Lock l(p.mu);
-        while (p.filled - p.written >= p.slots && !p.abort) p.chunkerCv.wait(p.mu);
+        // Hysteresis: once the ring is full, wait until a quarter of it has
+        // drained, then queue a whole batch under one lock. Refilling slot by
+        // slot cost a futex wake-up per chunk on both sides.
+        if (p.filled - p.written >= p.slots)
+            while (p.filled - p.written > p.slots - p.slots / 4 && !p.abort) p.chunkerCv.wait(p.mu);
         if (p.abort) return false;
-        j = &p.jobs[p.filled % p.slots];
+        const u32 n = min<u32>(u32(p.slots - (p.filled - p.written)), cuts.count - k);
+        for (u32 i = 0; i < n; ++i, ++k) {
+            Job& j = p.jobs[p.filled % p.slots];
+            j.seq = p.filled;
+            j.raw = base + cuts[k].off;
+            j.rawLen = cuts[k].len;
+            j.block = blockIdx;
+            j.item = item;
+            j.state = kJobQueued;
+            ++p.filled;
+        }
+        b.refs += n;
+        p.workerCv.broadcast();
     }
-    memCopy(j->raw, data, n);    // the slot is free and only the chunker fills free slots
-    Lock l(p.mu);
-    j->seq = p.filled;
-    j->item = item;
-    j->rawLen = n;
-    j->state = kJobQueued;
-    ++p.filled;
-    p.workerCv.signal();
     return true;
 }
 
 void* chunkerMain(void* arg) {
     Pipe& p = *static_cast<Pipe*>(arg);
-    Array<u8> win;
-    win.resize(kReadBlock + kMaxChunk);
-    u32 winLen = 0;
+    threadSetName("backu-chunker");
+    Array<Cut> cuts;
+    cuts.reserve(kReadBlock / kCdcMin + 2);
+    CdcHits hits;
     u32 fixed = 0;
+    // The block still holding an unconsumed tail, and that tail.
+    u32 prev = kInvalidIndex;
+    u32 tailOff = 0, tailLen = 0;
     bool ok = true;
     while (ok) {
-        BlockMeta m;
-        u8* buf;
+        u32 bi;
+        bool dropped;
         {
             Lock l(p.mu);
-            while (p.blockTail == p.blockHead && !p.readerDone && !p.abort) p.chunkerCv.wait(p.mu);
-            if (p.abort || p.blockTail == p.blockHead) break;
-            m = p.meta[p.blockTail % kBlocks];
-            buf = p.bufs[p.blockTail % kBlocks];
-        }
-        if (m.flags & kBlockFirst) {
-            winLen = 0;
-            fixed = sqliteChunkSize(buf, m.len);
-            p.itemBytes[m.item] = 0;
-        }
-        if (m.flags & kBlockError) {
-            p.itemFailed[m.item] = 1;
-            winLen = 0;
-        } else {
-            memCopy(win.ptr + winLen, buf, m.len);
-            winLen += m.len;
-            p.itemBytes[m.item] += m.len;
-        }
-        {
-            Lock l(p.mu);
+            for (;;) {
+                bi = p.blockTail % kBlocks;
+                if (p.abort || p.blocks[bi].state == kBlockReady) break;
+                if (p.readersRunning == 0 && p.blockTail == p.blockHead) break;
+                p.chunkerCv.wait(p.mu);
+            }
+            if (p.abort || p.blocks[bi].state != kBlockReady) break;
+            p.blocks[bi].state = kBlockChunking;
             ++p.blockTail;
-            p.readerCv.signal();
+            dropped = p.itemFailed[p.blocks[bi].item];
         }
-        if (m.flags & kBlockError) continue;
-        const bool last = m.flags & kBlockLast;
-        const u32 need = fixed ? fixed : kCdcMax;
+        Block& b = p.blocks[bi];
+        if (b.flags & kBlockFirst) {
+            tailLen = 0;     // a new file never continues the previous one's tail
+            fixed = sqliteChunkSize(b.data(), b.len);
+            p.itemBytes[b.item] = 0;
+        }
+        // Move the previous block's tail into this block's headroom, then let
+        // the previous block go (its queued jobs keep it alive until done).
+        // The tail's CDC candidates come along, rebased to the new window.
+        u8* const win = b.data() - tailLen;
+        hits.hard.clear();
+        hits.easy.clear();
+        if (tailLen && !dropped) {
+            memCopy(win, p.blocks[prev].mem + tailOff, tailLen);
+            const CdcHits& ph = p.blocks[prev].hits;
+            const u32 tailStart = tailOff - kMaxChunk;      // in prev's data coordinates
+            for (u32 h : ph.hard) if (h >= tailStart) hits.hard.push(h - tailStart);
+            for (u32 h : ph.easy) if (h >= tailStart) hits.easy.push(h - tailStart);
+        }
+        if (prev != kInvalidIndex) {
+            Lock l(p.mu);
+            releaseBlockLocked(p, p.blocks[prev]);
+            prev = kInvalidIndex;
+        }
+        if (dropped) {
+            // Unreadable (now or in an earlier block): this item is left out
+            // of the snapshot; its remaining blocks are discarded.
+            tailLen = 0;
+            Lock l(p.mu);
+            releaseBlockLocked(p, b);
+            continue;
+        }
+        p.itemBytes[b.item] += b.len;
+        const u32 winLen = tailLen + b.len;
+        const bool last = b.flags & kBlockLast;
+        cuts.clear();
         u32 pos = 0;
-        while (ok) {
-            const u32 rem = winLen - pos;
-            if (rem == 0 || (!last && rem < need)) break;
-            const u32 cut = fixed ? min(fixed, rem) : cdcNextCut(win.ptr + pos, rem);
-            ok = emitJob(p, m.item, win.ptr + pos, cut);
-            pos += cut;
+        if (fixed) {
+            for (;;) {
+                const u32 rem = winLen - pos;
+                if (rem == 0 || (!last && rem < fixed)) break;
+                const u32 cut = min(fixed, rem);
+                cuts.push(Cut{pos, cut});
+                pos += cut;
+            }
+        } else {
+            for (u32 h : b.hits.hard) hits.hard.push(h + tailLen);
+            for (u32 h : b.hits.easy) hits.easy.push(h + tailLen);
+            pos = cdcSelect(hits, winLen, last, cuts);
         }
-        memMove(win.ptr, win.ptr + pos, winLen - pos);
-        winLen -= pos;
+        ok = emitJobs(p, bi, b.item, win, cuts);
+        tailLen = winLen - pos;
+        if (tailLen) {
+            prev = bi;
+            tailOff = u32(win + pos - b.mem);
+        } else {
+            Lock l(p.mu);
+            releaseBlockLocked(p, b);
+        }
     }
     Lock l(p.mu);
+    if (prev != kInvalidIndex) releaseBlockLocked(p, p.blocks[prev]);
     p.chunkerDone = true;
     p.workerCv.broadcast();
     p.writerCv.broadcast();
@@ -448,6 +565,7 @@ void* chunkerMain(void* arg) {
 
 void* workerMain(void* arg) {
     Pipe& p = *static_cast<Pipe*>(arg);
+    threadSetName("backu-worker");
     CodecState* st = static_cast<CodecState*>(defaultAllocator().alloc(sizeof(CodecState)));
     Array<u8> payload;
     payload.resize(codecBound(kMaxChunk));
@@ -475,6 +593,8 @@ void* workerMain(void* arg) {
         p.mu.lock();
         j.recLen = recLen;
         j.state = kJobDone;
+        Block& b = p.blocks[j.block];
+        if (--b.refs == 0 && b.state == kBlockDraining) { b.state = kBlockFree; p.readerCv.signal(); }
         if (j.seq == p.written) p.writerCv.signal();
     }
     p.mu.unlock();
@@ -487,38 +607,59 @@ struct Stats {
 };
 
 // The writer: in sequence order, store first occurrences, record every ref.
+// The writer: in sequence order, store first occurrences, record every ref.
+// It takes every finished job at the head of the ring in one lock round and
+// writes their records with one writev, then frees the slots together.
 void writerLoop(Pipe& p, ContainerWriter& cw, Array<ChunkId>& refs, Array<u32>& itemFirst,
                 Array<u32>& itemCount, Stats& stats) {
+    constexpr u32 kBatch = 64;
+    IoSlice vec[kBatch];
+    u8 store[kBatch];
     p.mu.lock();
     for (;;) {
         while (!p.abort && (p.written < p.filled ? p.jobs[p.written % p.slots].state != kJobDone : !p.chunkerDone))
             p.writerCv.wait(p.mu);
         if (p.abort || (p.written == p.filled && p.chunkerDone)) break;
-        Job& j = p.jobs[p.written % p.slots];
-        // Only this thread inserts into `committed`, so reading it without
-        // the lock here is safe; workers read it under the lock.
-        const bool store = j.recLen && !setContains(p.committed, p.committedIds, j.id);
-        if (store) {
-            p.committed.insert(idHash(j.id), p.committedIds.count);
-            p.committedIds.push(j.id);
+        // Claim the run of finished jobs at the head. Only this thread
+        // inserts into `committed`, and it does so here, under the lock that
+        // workers read it under.
+        u32 n = 0;
+        while (n < kBatch && p.written + n < p.filled) {
+            Job& j = p.jobs[(p.written + n) % p.slots];
+            if (j.state != kJobDone) break;
+            store[n] = j.recLen && !setContains(p.committed, p.committedIds, j.id);
+            if (store[n]) {
+                p.committed.insert(idHash(j.id), p.committedIds.count);
+                p.committedIds.push(j.id);
+            }
+            ++n;
         }
         p.mu.unlock();
 
-        if (store) {
-            writerAddChunk(cw, j.id, j.seq, j.rawLen, j.rec, j.recLen);
-            ++stats.newChunks;
+        u32 nv = 0;
+        for (u32 k = 0; k < n; ++k) {
+            const Job& j = p.jobs[(p.written + k) % p.slots];
+            if (store[k]) {
+                vec[nv++] = IoSlice{j.rec, j.recLen};
+                writerNoteChunk(cw, j.id, j.seq, j.rawLen, j.recLen);
+                ++stats.newChunks;
+            }
+            ++stats.chunks;
+            stats.rawRead += j.rawLen;
+            if (itemCount[j.item] == 0) itemFirst[j.item] = refs.count;
+            ++itemCount[j.item];
+            refs.push(j.id);
         }
-        ++stats.chunks;
-        stats.rawRead += j.rawLen;
-        if (itemCount[j.item] == 0) itemFirst[j.item] = refs.count;
-        ++itemCount[j.item];
-        refs.push(j.id);
+        cw.out->writeVec(vec, nv);
         const bool failed = cw.out->failed;
 
         p.mu.lock();
-        j.state = kJobFree;
-        ++p.written;
-        p.chunkerCv.signal();
+        const u64 before = p.filled - p.written;
+        for (u32 k = 0; k < n; ++k) p.jobs[(p.written + k) % p.slots].state = kJobFree;
+        p.written += n;
+        // See emitJobs: wake the chunker when the ring drains past the mark.
+        const u64 mark = p.slots - p.slots / 4;
+        if (before > mark && p.filled - p.written <= mark) p.chunkerCv.signal();
         if (failed) { p.abort = true; p.readerCv.broadcast(); p.chunkerCv.broadcast(); p.workerCv.broadcast(); }
     }
     p.mu.unlock();
@@ -601,23 +742,25 @@ int cmdCreate(int argc, char** argv, int first) {
     p.committed.init(1024);
     p.itemBytes.resize(w.reads.count);
     p.itemFailed.resize(w.reads.count);
-    for (u32 i = 0; i < w.reads.count; ++i) { p.itemBytes[i] = 0; p.itemFailed[i] = 0; }
+    p.itemShrunk.resize(w.reads.count);
+    for (u32 i = 0; i < w.reads.count; ++i) { p.itemBytes[i] = 0; p.itemFailed[i] = 0; p.itemShrunk[i] = 0; }
     Array<u8> blockMem;
-    blockMem.resize(kReadBlock * kBlocks);
-    for (u32 i = 0; i < kBlocks; ++i) p.bufs[i] = blockMem.ptr + usize(i) * kReadBlock;
+    blockMem.resize((kMaxChunk + kReadBlock) * kBlocks);
+    for (u32 i = 0; i < kBlocks; ++i) p.blocks[i].mem = blockMem.ptr + usize(i) * (kMaxChunk + kReadBlock);
     // Slots bound the work in flight: enough that every worker has a job and
     // the writer a backlog while one worker is slow, few enough that memory
-    // stays at ~130 KiB per slot (raw + sealed buffers).
+    // stays at ~65 KiB per slot (one sealed-record buffer; raw data stays in
+    // the read blocks).
     p.slots = workers * 4 + 8;
+    // Readers: enough to keep a few reads in flight and the CDC scan (about a
+    // fifth of the per-byte work) ahead of the workers.
+    const u32 readers = min<u32>(4, max<u32>(1, (workers + 1) / 2));
     const u32 recCap = codecBound(kMaxChunk) + kRecordOverhead;
     Array<u8> jobMem;
-    jobMem.resize(p.slots * (kMaxChunk + recCap));
+    jobMem.resize(p.slots * recCap);
     Array<Job> jobs;
     jobs.resize(p.slots);
-    for (u32 i = 0; i < p.slots; ++i) {
-        jobs[i].raw = jobMem.ptr + usize(i) * (kMaxChunk + recCap);
-        jobs[i].rec = jobs[i].raw + kMaxChunk;
-    }
+    for (u32 i = 0; i < p.slots; ++i) jobs[i].rec = jobMem.ptr + usize(i) * recCap;
     p.jobs = jobs.ptr;
 
     OutStream out;
@@ -633,11 +776,17 @@ int cmdCreate(int argc, char** argv, int first) {
     for (u32 i = 0; i < w.reads.count; ++i) { itemFirst[i] = 0; itemCount[i] = 0; }
     Stats stats;
 
-    Thread reader, chunker;
-    Array<Thread> pool;
+    Thread chunker;
+    Array<Thread> readerThreads, pool;
+    readerThreads.resize(readers);
     pool.resize(workers);
-    u32 started = 0;
-    if (!reader.start(readerMain, &p) || !chunker.start(chunkerMain, &p)) {
+    u32 started = 0, readersStarted = 0;
+    for (u32 i = 0; i < readers; ++i) {
+        { Lock l(p.mu); ++p.readersRunning; }    // before start: a fast reader may finish at once
+        if (!readerThreads[readersStarted].start(readerMain, &p)) { Lock l(p.mu); --p.readersRunning; break; }
+        ++readersStarted;
+    }
+    if (readersStarted == 0 || !chunker.start(chunkerMain, &p)) {
         report("cannot start threads"_s); return kExitRuntime;
     }
     for (u32 i = 0; i < workers; ++i) {
@@ -646,7 +795,7 @@ int cmdCreate(int argc, char** argv, int first) {
     }
     if (started == 0) { report("cannot start worker threads"_s); return kExitRuntime; }
     writerLoop(p, cw, newRefs, itemFirst, itemCount, stats);
-    reader.join();
+    for (u32 i = 0; i < readersStarted; ++i) readerThreads[i].join();
     chunker.join();
     for (u32 i = 0; i < started; ++i) pool[i].join();
 

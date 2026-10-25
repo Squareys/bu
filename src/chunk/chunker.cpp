@@ -40,16 +40,17 @@ static_assert(__builtin_popcountll(kMaskHard) == 15 && __builtin_popcountll(kMas
 
 } // namespace
 
-u32 cdcNextCut(const u8* p, u32 n) {
+// The reference definition. The hash at byte i is the gear hash of bytes
+// [i-63, i]; it is primed over the 63 bytes before kCdcMin, so the first
+// tested position already sees a full window. (Without the priming the cut
+// points would depend on the chunk start and phase 1 could not run ahead.)
+BK_HOT u32 cdcNextCut(const u8* p, u32 n) {
     if (n <= kCdcMin) return n;     // only legal at eof: the tail is one chunk
     const u32 limit = n < kCdcMax ? n : kCdcMax;
     const u32 normal = limit < kCdcAvg ? limit : kCdcAvg;
     u64 h = 0;
+    for (u32 i = kCdcMin - 63; i < kCdcMin; ++i) h = (h << 1) + kGear.v[p[i]];
     u32 i = kCdcMin;
-    // FastCDC skips the first kCdcMin bytes: no cut can fall there, so
-    // hashing them would only be work. The hash therefore starts empty at
-    // kCdcMin, which is fine — the mask only looks at high bits, which fill
-    // within ~32 bytes.
     for (; i < normal; ++i) {
         h = (h << 1) + kGear.v[p[i]];
         if (!(h & kMaskHard)) return i + 1;
@@ -59,6 +60,60 @@ u32 cdcNextCut(const u8* p, u32 n) {
         if (!(h & kMaskEasy)) return i + 1;
     }
     return limit;
+}
+
+namespace {
+
+// Positions i in [0, n) of p, hash primed over p[-warm, 0), recorded as base + i.
+inline void scanImpl(const u8* p, u32 warm, u32 n, u32 base, CdcHits& out) {
+    u64 h = 0;
+    for (const u8* q = p - warm; q < p; ++q) h = (h << 1) + kGear.v[*q];
+    // Easy hits are ~1 in 8 KiB and hard ones ~1 in 32 KiB, and the 9 mask
+    // bits they share pass ~1 in 512, so the branch is almost never taken and
+    // the loop is one load, one shift-add and one test per byte.
+    constexpr u64 kEither = kMaskHard & kMaskEasy;
+    for (u32 i = 0; i < n; ++i) {
+        h = (h << 1) + kGear.v[p[i]];
+        if (__builtin_expect(!(h & kEither), 0)) {
+            if (!(h & kMaskHard)) out.hard.push(base + i);
+            if (!(h & kMaskEasy)) out.easy.push(base + i);
+        }
+    }
+}
+
+} // namespace
+
+BK_HOT void cdcScan(const u8* p, u32 from, u32 to, CdcHits& out) {
+    scanImpl(p + from, from >= 63 ? 63 : from, to - from, from, out);
+}
+
+BK_HOT void cdcScanWarm(const u8* p, u32 warm, u32 n, CdcHits& out) {
+    scanImpl(p, warm > 63 ? 63 : warm, n, 0, out);
+}
+
+BK_HOT u32 cdcSelect(const CdcHits& hits, u32 n, bool last, Array<Cut>& cuts) {
+    u32 start = 0, ih = 0, ie = 0;
+    for (;;) {
+        const u32 rem = n - start;
+        if (rem == 0 || (!last && rem < kCdcMax)) break;
+        u32 len;
+        if (rem <= kCdcMin) {
+            len = rem;
+        } else {
+            const u32 limit = start + (rem < kCdcMax ? rem : kCdcMax);
+            const u32 normal = limit < start + kCdcAvg ? limit : start + kCdcAvg;
+            // Both lists ascend and chunk starts only move forward, so each
+            // index only ever advances: the whole selection is linear.
+            while (ih < hits.hard.count && hits.hard[ih] < start + kCdcMin) ++ih;
+            while (ie < hits.easy.count && hits.easy[ie] < normal) ++ie;
+            if (ih < hits.hard.count && hits.hard[ih] < normal) len = hits.hard[ih] + 1 - start;
+            else if (ie < hits.easy.count && hits.easy[ie] < limit) len = hits.easy[ie] + 1 - start;
+            else len = limit - start;
+        }
+        cuts.push(Cut{start, len});
+        start += len;
+    }
+    return start;
 }
 
 u32 sqliteChunkSize(const u8* head, u32 n) {

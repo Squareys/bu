@@ -50,21 +50,21 @@ bool cryptoCpuCheck(String& err) {
     return true;
 }
 
-void blake3Hash(const void* data, usize n, u8 out[32]) {
+BK_HOT void blake3Hash(const void* data, usize n, u8 out[32]) {
     blake3_hasher h;
     blake3_hasher_init(&h);
     blake3_hasher_update(&h, data, n);
     blake3_hasher_finalize(&h, out, 32);
 }
 
-void blake3Keyed(const Key& key, const void* data, usize n, u8* out, usize outLen) {
+BK_HOT void blake3Keyed(const Key& key, const void* data, usize n, u8* out, usize outLen) {
     blake3_hasher h;
     blake3_hasher_init_keyed(&h, key.b);
     blake3_hasher_update(&h, data, n);
     blake3_hasher_finalize(&h, out, outLen);
 }
 
-void blake3DeriveKey(StringView context, const void* material, usize n, Key& out) {
+BK_HOT void blake3DeriveKey(StringView context, const void* material, usize n, Key& out) {
     blake3_hasher h;
     blake3_hasher_init_derive_key_raw(&h, context.ptr, context.count);
     blake3_hasher_update(&h, material, n);
@@ -75,14 +75,14 @@ void aeadInit(AeadKey& st, const Key& key) {
     crypto_aead_aes256gcm_beforenm(reinterpret_cast<crypto_aead_aes256gcm_state*>(&st), key.b);
 }
 
-void aeadSeal(const AeadKey& st, const u8 nonce[kNonceBytes], const u8* ad, usize adLen,
+BK_HOT void aeadSeal(const AeadKey& st, const u8 nonce[kNonceBytes], const u8* ad, usize adLen,
               const u8* in, usize n, u8* out) {
     crypto_aead_aes256gcm_encrypt_detached_afternm(
         out, out + n, nullptr, in, n, ad, adLen, nullptr, nonce,
         reinterpret_cast<const crypto_aead_aes256gcm_state*>(&st));
 }
 
-bool aeadOpen(const AeadKey& st, const u8 nonce[kNonceBytes], const u8* ad, usize adLen,
+BK_HOT bool aeadOpen(const AeadKey& st, const u8 nonce[kNonceBytes], const u8* ad, usize adLen,
               const u8* in, usize n, u8* out) {
     // libsodium's decrypt_detached with m == NULL means "verify only"; we
     // always want plaintext, and an empty record still needs a real pointer.

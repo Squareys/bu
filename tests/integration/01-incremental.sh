@@ -24,11 +24,13 @@ note "full: $FULL bytes"
 assert_between "$FULL" 10300000 11700000 "full backup size"
 "$BACKU" check --key key full.bk
 # Thread count changes speed, never the output: record order and nonces are
-# fixed before workers run, so the layout (hence the size) is identical.
+# fixed before workers run, so the chunk table (IDs, lengths, nonces, order)
+# is identical. (The file bytes are not: every backup has a fresh salt.)
 "$BACKU" create --key key --index-out idx-j1 -j 1 src > full-j1.bk
 "$BACKU" create --key key --index-out idx-j7 -j 7 src > full-j7.bk
-[ "$(size_of full-j1.bk)" = "$FULL" ] && [ "$(size_of full-j7.bk)" = "$FULL" ] \
-    || fail "output size depends on -j: $FULL vs $(size_of full-j1.bk) vs $(size_of full-j7.bk)"
+table() { "$BACKU" list --key key "$1" | head -1 | grep -o 'table [0-9a-f]*'; }
+[ "$(table full.bk)" = "$(table full-j1.bk)" ] && [ "$(table full.bk)" = "$(table full-j7.bk)" ] \
+    || fail "chunk table depends on -j: $(table full.bk) / $(table full-j1.bk) / $(table full-j7.bk)"
 [ "$("$BACKU" list --key key full-j1.bk | tail -n +2)" = "$("$BACKU" list --key key full-j7.bk | tail -n +2)" ] \
     || fail "listing depends on -j"
 
