@@ -1,0 +1,7 @@
+# Build trees live outside the source tree (scripts/build.sh); these catch
+# an in-tree `cmake -B build` and editor/tool droppings.
+/build*/
+/compile_commands.json
+/.cache/
+*.bk
+*.idx

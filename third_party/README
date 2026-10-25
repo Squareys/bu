@@ -1,0 +1,77 @@
+third_party/ — vendored dependencies
+====================================
+
+Everything here is third-party source compiled into backu. Rules:
+
+  * Vendor upstream release files verbatim. Never edit them in place: trim
+    and configure through compile-time defines in CMakeLists.txt, so a version
+    bump is a file copy and a diff against upstream is empty.
+  * Each library is its own CMake object library built with -w and its own
+    flags (-O3; see CMakeLists.txt). Our warnings and no-STL rules apply to
+    src/, not to vendored C.
+  * Permissive licences only. Each library's licence file sits beside it.
+  * Each header is included by exactly one backu translation unit (named
+    below), so replacing a library is a one-file change.
+  * Record the exact version, the URL of the release artifact and its sha256,
+    so the next bump is reproducible and the provenance checkable.
+
+Inventory
+---------
+
+BLAKE3  1.8.7  —  CC0-1.0 OR Apache-2.0 (OR Apache-2.0 WITH LLVM-exception)
+    Upstream: https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.8.7.tar.gz
+    sha256:   c6782a28842b1c0478524ac06a4f2ede784038ee298d6e2162c0b089c4306a3c
+    Files:    blake3/{blake3.c,blake3.h,blake3_impl.h,blake3_dispatch.c,
+              blake3_portable.c,blake3_sse41.c,blake3_avx2.c,blake3_avx512.c}
+              from c/, plus LICENSE_A2, LICENSE_A2LLVM, LICENSE_CC0.
+    Target:   bk_blake3. Header confined to src/crypto/crypto.cpp.
+    Config:   BLAKE3_NO_SSE2 — backu refuses CPUs without AES-NI, and every
+              AES-NI CPU has SSE4.1, so the SSE2 variant could never be
+              dispatched to. The intrinsics files are compiled with -msse4.1,
+              -mavx2 and -mavx512f -mavx512vl respectively; blake3_dispatch.c
+              picks one at run time from CPUID, as upstream intends. The
+              assembly variants are not used (the intrinsics files are the
+              upstream-recommended portable-build path and LTO can see them).
+    Why:      the fastest well-reviewed hash with a keyed mode (chunk IDs are a
+              MAC of the content) and a derive_key mode (subkeys) in one
+              primitive; SIMD-parallel even within a 16 KB chunk.
+
+LZ4  1.10.0  —  BSD-2-Clause (lib/ only)
+    Upstream: https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz
+    sha256:   537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b
+    Files:    lz4/lz4.c, lz4/lz4.h, lz4/LICENSE (= lib/LICENSE).
+    Target:   bk_lz4. Header confined to src/format/codec.cpp.
+    Config:   none; the block API only (LZ4_compress_fast_extState,
+              LZ4_decompress_safe). --gc-sections drops the streaming and
+              dictionary entry points.
+    Why:      compression that is never the bottleneck behind disk I/O
+              (~700 MB/s per core compressing, several GB/s decompressing),
+              with a bounds-checked decoder.
+
+libsodium  1.0.22  —  ISC
+    Upstream: https://github.com/jedisct1/libsodium/releases/download/1.0.22-RELEASE/libsodium-1.0.22.tar.gz
+    sha256:   adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349
+    Files:    libsodium/aead_aes256gcm_aesni.c
+                (= src/libsodium/crypto_aead/aes256gcm/aesni/aead_aes256gcm_aesni.c)
+              libsodium/include/sodium/{core.h,crypto_aead_aes256gcm.h,
+                crypto_verify_16.h,export.h,randombytes.h,runtime.h,utils.h,
+                private/common.h,private/sse2_64_32.h}  (declarations it includes)
+              libsodium/LICENSE
+              libsodium/shim/sodium_shim.c — NOT upstream: written for backu
+                (MIT, like src/). Defines the five support symbols the AES-GCM
+                file references (sodium_misuse, sodium_memzero,
+                crypto_verify_16, sodium_runtime_has_{aesni,pclmul,avx}) so that
+                one file of libsodium can be vendored instead of the library.
+    Target:   bk_aesgcm. Header confined to src/crypto/crypto.cpp.
+    Config:   CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1 HAVE_TMMINTRIN_H=1
+              HAVE_WMMINTRIN_H=1 HAVE_GCC_MEMORY_FENCES=1 — what libsodium's
+              configure would define on x86-64 Linux.
+    Why:      a vetted, self-contained AES-256-GCM over AES-NI + PCLMULQDQ
+              (7 blocks in parallel with aggregated GHASH) by
+              the libsodium author, with runtime target attributes so it
+              compiles into a generic x86-64 binary. Needs AES-NI, PCLMULQDQ and
+              AVX at run time; src/crypto/crypto.cpp refuses other CPUs by name.
+              There is no VAES/VPCLMULQDQ (AVX-512 wide) path in this release;
+              see docs/design.md for what that would buy.
+    Tests:    tests/test_crypto.cpp — GCM spec test cases 13-16 and OpenSSL-
+              computed tags for 113 B .. 64 KiB messages (tests/tools/gcm_reference.py).
