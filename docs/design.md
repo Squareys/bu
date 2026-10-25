@@ -350,7 +350,7 @@ merge: 3.0 GB/s.
 
 ## 10. Size
 
-Stripped binary: **174 616 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **174 944 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
@@ -358,9 +358,13 @@ glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 | BLAKE3 (portable + SSE4.1 + AVX2 + AVX-512, -O3) | 64 114 |
 | AES-256-GCM (libsodium AES-NI, -O3) | 21 104 |
 | LZ4 (inlined into codecEncode/codecDecode) | 8 768 |
-| backu hot path (-O2) | 3 862 |
-| backu cold path: CLI, walk, pipeline, manifest, restore, merge (-Oz) | 56 067 |
-| crt and runtime glue | 4 113 |
+| backu hot path (-O2) | 4 078 |
+| backu cold path: CLI, walk, pipeline, manifest, restore, merge (-Oz) | 56 105 |
+| crt and runtime glue | 3 966 |
+
+The remaining ~17 KB of the file are ELF headers, dynamic-linking tables
+(`.dynsym`, `.dynstr`, relocations for the ~80 glibc symbols used) and
+section alignment.
 
 The size rule is "small by default, speed wins on hot paths", so the budget
 went to the SIMD variants: the AVX-512 BLAKE3 kernel alone is 21 KB, and
