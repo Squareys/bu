@@ -514,16 +514,17 @@ void* chunkerMain(void* arg) {
         }
         // Move the previous block's tail into this block's headroom, then let
         // the previous block go (its queued jobs keep it alive until done).
-        // The tail's CDC candidates come along, rebased to the new window.
+        // The tail's CDC candidates are found by rescanning it (< 64 KiB):
+        // the tail starts a chunk, so its first 63 bytes are never tested and
+        // need no warm-up, and rescanning is right even when the tail itself
+        // began in the previous block's headroom (a file that shrank mid-read
+        // can leave a short, non-final block).
         u8* const win = b.data() - tailLen;
         hits.hard.clear();
         hits.easy.clear();
         if (tailLen && !dropped) {
             memCopy(win, p.blocks[prev].mem + tailOff, tailLen);
-            const CdcHits& ph = p.blocks[prev].hits;
-            const u32 tailStart = tailOff - kMaxChunk;      // in prev's data coordinates
-            for (u32 h : ph.hard) if (h >= tailStart) hits.hard.push(h - tailStart);
-            for (u32 h : ph.easy) if (h >= tailStart) hits.easy.push(h - tailStart);
+            if (!fixed) cdcScan(win, 0, tailLen, hits);
         }
         if (prev != kInvalidIndex) {
             Lock l(p.mu);
