@@ -1,0 +1,29 @@
+# CI: build, the full test suite, and the sanitizer builds. Needs an image
+# with clang, cmake, ninja, openssl (test data) and optionally sqlite3.
+stages: [test]
+
+.base:
+  image: archlinux:latest
+  before_script:
+    - pacman -Syu --noconfirm clang lld cmake ninja openssl sqlite python util-linux
+  variables:
+    BACKU_BUILD_ROOT: "$CI_PROJECT_DIR/.build"
+
+test:
+  extends: .base
+  stage: test
+  script:
+    - scripts/test.sh
+    - scripts/size_report.sh
+
+asan:
+  extends: .base
+  stage: test
+  script:
+    - scripts/test.sh --asan
+
+tsan:
+  extends: .base
+  stage: test
+  script:
+    - scripts/test.sh --tsan

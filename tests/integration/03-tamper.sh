@@ -23,6 +23,9 @@ expect_fail "authentication failed" "$BACKU" restore --key key -C out bad.bk
 # Restore must not report success for any part of it.
 [ ! -e out/src/t.bin ] || ! cmp -s out/src/t.bin src/t.bin || fail "tampered data restored intact?"
 
+# The format version: refused as such, before any key is tried.
+flip good.bk 8
+expect_fail "unsupported format version" "$BACKU" check --key key bad.bk
 # A byte in the header's salt: every key derived from it changes.
 flip good.bk 20
 expect_fail "wrong key" "$BACKU" check --key key bad.bk

@@ -422,7 +422,8 @@ Losing it makes every backup unreadable, by design.
 
 - Hard links (restored as separate files), extended attributes, ACLs,
   device files, FIFOs and sockets (skipped with a warning), file flags.
-- Exclude patterns; back up what you name.
+- Exclude patterns and a one-file-system switch; back up what you name (the
+  walk descends into mounted filesystems).
 - More than one snapshot per file, and pruning other than by merging.
 - A ChaCha20-Poly1305 fallback for CPUs without AES-NI (§3).
 - Fixed-size chunking for caller-chosen files (`--fixed`): SQLite gets page
