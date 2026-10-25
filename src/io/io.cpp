@@ -13,6 +13,14 @@
 
 namespace bk {
 
+// Declared in core/string.hpp; lives here, in a cold (-Oz) TU, because
+// nothing on a hot path builds error messages.
+bool errSetParts(String& e, const StringView* parts, u32 n) {
+    e.clear();
+    for (u32 i = 0; i < n; ++i) e.append(parts[i]);
+    return false;
+}
+
 i64 readFull(int fd, void* buf, usize n) {
     u8* p = static_cast<u8*>(buf);
     usize got = 0;

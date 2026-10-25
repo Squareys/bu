@@ -76,11 +76,15 @@ struct String {
 };
 
 // Build an error message from parts without stdio: `errSet(err, "open ", path, ": ", why)`.
-// Parsers and library code never print; they fill `err` and the command prints it once.
-inline void errAppendAll(String&) {}
-template <typename... Rest>
-inline void errAppendAll(String& e, StringView first, Rest... rest) { e.append(first); errAppendAll(e, rest...); }
+// Parsers and library code never print; they fill `err` and the command
+// prints it once. The template only gathers views; the appending is one
+// out-of-line function, so the ~150 error sites cost a call each, not an
+// inlined append loop each (that was ~1 KB in cryptoCpuCheck alone).
+bool errSetParts(String& e, const StringView* parts, u32 n);
 template <typename... Parts>
-inline bool errSet(String& e, Parts... parts) { e.clear(); errAppendAll(e, StringView(parts)...); return false; }
+inline bool errSet(String& e, Parts... parts) {
+    const StringView v[] = {StringView(parts)...};
+    return errSetParts(e, v, u32(sizeof...(Parts)));
+}
 
 } // namespace bk
