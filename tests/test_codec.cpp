@@ -1,0 +1,58 @@
+// test_codec.cpp — the record payload framing: LZ4 when it helps, stored when
+// it does not, and a decoder that refuses every malformed or lying payload
+// instead of overrunning (an authenticated payload is still untrusted input).
+
+#include "format/codec.hpp"
+#include "core/array.hpp"
+#include "test.hpp"
+
+using namespace bk;
+
+BK_TEST(codec_compressible_data_uses_lz4_and_roundtrips) {
+    Array<u8> raw, enc, back;
+    raw.resize(65536);
+    for (u32 i = 0; i < raw.count; ++i) raw[i] = u8("backu "[i % 6]);
+    enc.resize(codecBound(raw.count));
+    CodecState st;
+    const u32 n = codecEncode(st, raw.ptr, raw.count, enc.ptr);
+    BK_CHECK(enc[0] == kCodecLz4);
+    BK_CHECK(n < raw.count / 10);
+    u32 rawLen = 0;
+    BK_REQUIRE(codecRawLength(enc.ptr, n, 65536, rawLen) && rawLen == raw.count);
+    back.resize(rawLen);
+    BK_CHECK(codecDecode(enc.ptr, n, back.ptr, rawLen));
+    BK_CHECK(memEqual(back.ptr, raw.ptr, raw.count));
+}
+
+BK_TEST(codec_incompressible_data_is_stored_with_one_byte_overhead) {
+    Array<u8> raw, enc, back;
+    raw.resize(16384);
+    u64 x = 88172645463325252ull;
+    for (u32 i = 0; i < raw.count; ++i) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; raw[i] = u8(x); }
+    enc.resize(codecBound(raw.count));
+    CodecState st;
+    const u32 n = codecEncode(st, raw.ptr, raw.count, enc.ptr);
+    BK_CHECK(enc[0] == kCodecStored);
+    BK_CHECK_EQ(n, raw.count + 1);
+    u32 rawLen = 0;
+    BK_REQUIRE(codecRawLength(enc.ptr, n, 65536, rawLen));
+    back.resize(rawLen);
+    BK_CHECK(codecDecode(enc.ptr, n, back.ptr, rawLen) && memEqual(back.ptr, raw.ptr, raw.count));
+}
+
+BK_TEST(codec_refuses_lying_and_truncated_payloads) {
+    Array<u8> raw, enc, back;
+    raw.resize(8192);
+    for (u32 i = 0; i < raw.count; ++i) raw[i] = u8(i / 64);
+    enc.resize(codecBound(raw.count));
+    CodecState st;
+    const u32 n = codecEncode(st, raw.ptr, raw.count, enc.ptr);
+    BK_REQUIRE(enc[0] == kCodecLz4);
+    u32 rawLen = 0;
+    BK_CHECK(!codecRawLength(enc.ptr, n, 4096, rawLen));          // above the cap
+    back.resize(8192);
+    BK_CHECK(!codecDecode(enc.ptr, n - 3, back.ptr, 8192));       // truncated stream
+    BK_CHECK(!codecDecode(enc.ptr, n, back.ptr, 8000));           // wrong claimed length
+    const u8 bogus[2] = {7, 0};
+    BK_CHECK(!codecRawLength(bogus, 2, 65536, rawLen));          // unknown codec
+}
