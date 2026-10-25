@@ -31,5 +31,10 @@ First release. File format version 1.
 - Parallel create pipeline (readers, chunker, `-j N` workers, ordered
   writer) with output independent of thread scheduling; parallel restore,
   check and merge.
+- Robustness: files that change size while being read are stored as walked
+  and reported; unreadable files are left out and reported (exit 1, backup
+  still valid); a backup never contains its own output file; an unwritable
+  index location is refused before reading; a key file readable by others
+  is reported.
 - Known-answer tests for BLAKE3 and AES-256-GCM, unit and integration tests,
   ASan/UBSan and TSan builds, benchmarks (`scripts/bench.sh`).

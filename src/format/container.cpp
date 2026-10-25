@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -51,6 +52,12 @@ bool fail(String& err, const Container& c, StringView what) {
 bool keyLoad(const char* path, MasterKey& out, String& err) {
     Array<u8> text;
     if (!readWholeFile(path, 4096, text, err)) return false;
+    // Like ssh with a private key: say so when others can read it. A warning,
+    // not a refusal — a key on a read-only medium or in a container may have
+    // modes the user cannot change, and refusing would not make it secret.
+    struct stat st;
+    if (stat(path, &st) == 0 && (st.st_mode & 077))
+        fprintf(stderr, "backu: warning: key file %s is accessible by other users (chmod 600 it)\n", path);
     StringView s(reinterpret_cast<const char*>(text.ptr), text.count);
     while (!s.empty() && (s[s.count - 1] == '\n' || s[s.count - 1] == '\r')) s.count--;
     const bool ok = s.startsWith(kKeyPrefix) && hexDecode(s.from(kKeyPrefix.count), out.master.b, kKeyBytes);

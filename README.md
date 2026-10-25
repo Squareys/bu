@@ -36,7 +36,7 @@ backu says so by name if yours lacks one.
 ## Use
 
 ```sh
-backu keygen > ~/.backu.key            # keep it safe, and NOT next to the backups
+(umask 077; backu keygen > ~/.backu.key)   # keep it safe, and NOT next to the backups
 
 # full backup, then increments from the index
 backu create --key ~/.backu.key --index-out data.idx ~/data > full.bk

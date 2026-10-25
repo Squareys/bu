@@ -50,8 +50,11 @@ constexpr u8 kRecIndex = 4;
 
 // Largest raw chunk any chunker emits (CDC max, or one 64 KiB SQLite page).
 constexpr u32 kMaxChunk = 64u << 10;
-// Largest metadata record (manifest, trailer, index) a reader will allocate for.
-constexpr u32 kMaxMetaRecord = 1u << 30;
+// Largest metadata record (manifest, trailer, index) a reader will allocate
+// for. The trailer is the one that grows: ~22 bytes per new chunk, so 3 GiB
+// bounds one backup file at ~140 million new chunks, ~2.8 TB of unique data
+// at the average chunk size (docs/design.md §12).
+constexpr u32 kMaxMetaRecord = 3u << 30;
 
 constexpr u64 kNonceMetaBase = u64(1) << 63;
 constexpr u64 kNonceManifest = kNonceMetaBase + 0;

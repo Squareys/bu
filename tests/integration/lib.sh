@@ -53,4 +53,4 @@ expect_fail() {   # expect_fail PATTERN cmd...
     echo "$out" | grep -qi -- "$pat" || fail "expected '$pat' in error from '$*', got: $out"
 }
 
-"$BACKU" keygen > key
+(umask 077; "$BACKU" keygen > key)

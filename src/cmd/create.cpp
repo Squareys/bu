@@ -79,6 +79,8 @@ struct Walk {
     HashIndex seen;              // stored paths already added (overlapping roots)
     const IndexData* base = nullptr;
     bool useCache = false;
+    bool skipOut = false;        // stdout is a regular file at (skipDev, skipIno)
+    u64 skipDev = 0, skipIno = 0;
     u32 warnings = 0;
     u64 bytesToRead = 0;
     u64 bytesCached = 0;
@@ -135,6 +137,7 @@ void addEntry(Walk& w, int dirfd, const char* name, StringView stored, StringVie
     else if (S_ISDIR(st.st_mode)) type = kEntryDir;
     else if (S_ISLNK(st.st_mode)) type = kEntrySymlink;
     else { warn(w, fsPath, "skipping special file (device, fifo or socket)"_s); return; }
+    if (w.skipOut && u64(st.st_dev) == w.skipDev && u64(st.st_ino) == w.skipIno) return;   // our own output
 
     if (!stored.empty()) {
         const u64 h = fnv1a(stored);
@@ -324,7 +327,8 @@ struct ReaderFd {
 };
 
 // Open read item `it` (relative to a cached directory fd). -1 with errno set.
-int openItem(ReaderFd& r, const Walk& w, u32 it) {
+// `sizeNow` is its size at open (only set when it was opened by this call).
+int openItem(ReaderFd& r, const Walk& w, u32 it, u64& sizeNow) {
     if (r.item == it) return r.fd;
     r.closeFile();
     const ReadItem& ri = w.reads[it];
@@ -348,6 +352,7 @@ int openItem(ReaderFd& r, const Walk& w, u32 it) {
     if (fd < 0) return -1;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); errno = EINVAL; return -1; }
+    sizeNow = u64(st.st_size);
     posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
     r.fd = fd;
     r.item = it;
@@ -399,7 +404,12 @@ void* readerMain(void* arg) {
         bool failed = false, shrunk = false;
         int err = 0;
         if (len) {
-            const int fd = openItem(rf, w, item);
+            const u64 planned = w.snap.entries[w.reads[item].entry].size;
+            u64 sizeNow = planned;
+            const int fd = openItem(rf, w, item, sizeNow);
+            // Grown or shrunk since the walk: the backup keeps the walked size
+            // (or what is left), and says so, as Borg's "file changed" does.
+            if (fd >= 0 && sizeNow != planned) shrunk = true;
             if (fd < 0) { failed = true; err = errno; }
             else {
                 // Read the warm-up bytes with the block: one syscall, and the
@@ -423,7 +433,8 @@ void* readerMain(void* arg) {
             const ReadItem& ri = w.reads[item];
             const StringView fs(w.fsPaths.ptr + ri.fsOff, ri.fsLen);
             if (failed && !p.itemFailed[item]) readWarnLocked(p, fs, StringView(strerror(err)));
-            if (shrunk && !failed && !p.itemShrunk[item]) readWarnLocked(p, fs, "shrank while being read; stored what was there"_s);
+            if (shrunk && !failed && !p.itemShrunk[item])
+                readWarnLocked(p, fs, "changed size while being backed up; stored the size seen by the walk (or what was left)"_s);
             if (failed) p.itemFailed[item] = 1;
             if (shrunk) p.itemShrunk[item] = 1;
         }
@@ -697,6 +708,17 @@ int cmdCreate(int argc, char** argv, int first) {
     if (!cryptoCpuCheck(err)) { report(err); return kExitRuntime; }
     MasterKey key;
     if (!keyLoad(a.key, key, err)) { report(err); return kExitRuntime; }
+    // Fail before reading a byte if the index cannot be written: discovering
+    // it after streaming a 100 GB backup would leave a backup with no index.
+    {
+        String probe(StringView(a.indexOut));
+        probe.append(".probe.");
+        probe.appendU64(u64(getpid()));
+        const int fd = open(probe.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd < 0) { fprintf(stderr, "backu: cannot write the index next to %s: %s\n", a.indexOut, strerror(errno)); return kExitRuntime; }
+        close(fd);
+        unlink(probe.c_str());
+    }
 
     const i64 startNs = nowNs();
     IndexData base;
@@ -716,6 +738,12 @@ int cmdCreate(int argc, char** argv, int first) {
     Walk w;
     w.base = &base;
     w.useCache = haveBase && !a.noCache;
+    // `backu create . > ./today.bk` must not back up its own output while
+    // writing it: remember stdout's inode if it is a regular file.
+    {
+        struct stat out;
+        if (fstat(1, &out) == 0 && S_ISREG(out.st_mode)) { w.skipDev = u64(out.st_dev); w.skipIno = u64(out.st_ino); w.skipOut = true; }
+    }
     for (const char* rootArg : a.positional) {
         String stored;
         if (!storedName(StringView(rootArg), stored)) {
@@ -823,13 +851,7 @@ int cmdCreate(int argc, char** argv, int first) {
                 if (p.itemFailed[it]) continue;     // unreadable: left out (warned)
                 fin.refs.appendRange(newRefs.ptr + itemFirst[it], itemCount[it]);
                 e.refCount = itemCount[it];
-                if (p.itemBytes[it] != e.size) {
-                    const StringView path = entryPath(fin, e);
-                    fprintf(stderr, "backu: warning: %.*s: changed size while being read; stored what was read\n",
-                            int(path.count), path.ptr);
-                    ++w.warnings;
-                    e.size = p.itemBytes[it];
-                }
+                e.size = p.itemBytes[it];           // differs only if it shrank (warned by the reader)
             }
         }
         fin.entries.push(e);

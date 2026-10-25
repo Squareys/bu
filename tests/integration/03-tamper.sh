@@ -37,7 +37,7 @@ head -c $((SIZE - 1000)) good.bk > bad.bk
 expect_fail "" "$BACKU" check --key key bad.bk
 
 # The wrong key.
-"$BACKU" keygen > other
+(umask 077; "$BACKU" keygen > other)
 expect_fail "wrong key" "$BACKU" restore --key other -C out good.bk
 expect_fail "wrong key" "$BACKU" create --key other --base idx --index-out idx2 src
 # Not a backup at all.

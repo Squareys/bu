@@ -301,6 +301,16 @@ pipe reader is a reported error and the index is not updated.
 
 `restore`, `check` and `merge` use a thread pool over independent chunk tasks.
 
+**Files that change underneath.** The backup is of the tree as walked: a file
+is read up to the size the walk saw. One that grew or shrank by the time it
+is opened is backed up anyway (what is there, up to the walked size) with a
+"changed size" warning; one that cannot be opened or read is left out with a
+warning. Either way `create` exits 1 while the backup and index stay valid,
+which is Borg's convention for "completed with warnings". A backup written
+into the tree it is backing up (`backu create . > x.bk`) skips its own output
+file by inode, and an index location that cannot be written is refused
+before anything is read.
+
 ### Measurements
 
 Intel i7-12700H (6P+8E cores, 20 threads, no AVX-512), data on tmpfs (so
@@ -420,3 +430,6 @@ Losing it makes every backup unreadable, by design.
 - Live-database consistency (§2).
 - A parallel walk: stat is cheap next to reading; the readers already overlap
   opens.
+- Unbounded backup files: the trailer is capped at 3 GiB (~22 bytes per new
+  chunk), i.e. ~140 million new chunks or ~2.8 TB of unique data in one
+  backup file. Larger first backups can be split by directory.
