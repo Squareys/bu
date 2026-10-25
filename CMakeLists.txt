@@ -21,6 +21,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(BK_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+option(BK_TSAN "Build with ThreadSanitizer (the create pipeline and the thread pool)" OFF)
 
 # ---------------------------------------------------------------- flags ----
 #
@@ -52,12 +53,24 @@ set(BK_CXX_FLAGS
     -Werror=dangling
 )
 
+if(BK_SANITIZE AND BK_TSAN)
+    message(FATAL_ERROR "BK_SANITIZE and BK_TSAN are separate builds")
+endif()
+if(BK_TSAN)
+    set(BK_SANITIZE ON)    # same build shape (no LTO, -O1 -g), different sanitizer
+    set(BK_SAN_KIND thread)
+else()
+    set(BK_SAN_KIND address,undefined)
+endif()
 if(BK_SANITIZE)
     set(BK_OPT_FLAGS -O1 -g -fno-omit-frame-pointer
-        -fsanitize=address,undefined -fno-sanitize-recover=undefined)
-    set(BK_LINK_FLAGS -fsanitize=address,undefined)
+        -fsanitize=${BK_SAN_KIND} -fno-sanitize-recover=all)
+    set(BK_LINK_FLAGS -fsanitize=${BK_SAN_KIND})
     set(BK_LTO_FLAGS)
+    set(BK_NOSTDLIBXX)              # the ASan runtime's C++ half needs libstdc++
 else()
+    # No STL, no exceptions, no RTTI: nothing needs libstdc++, so don't link it.
+    set(BK_NOSTDLIBXX -nostdlib++)
     set(BK_OPT_FLAGS -O2 -DNDEBUG)
     set(BK_LTO_FLAGS -flto)
     # lld: --gc-sections drops every unreferenced function the sections flags
@@ -154,7 +167,7 @@ set(BK_OBJECTS $<TARGET_OBJECTS:bk_hot> $<TARGET_OBJECTS:bk_cold> $<TARGET_OBJEC
 add_executable(backu src/main.cpp ${BK_OBJECTS})
 target_include_directories(backu PRIVATE src)
 target_compile_options(backu PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
-target_link_options(backu PRIVATE ${BK_LINK_FLAGS} -nostdlib++)
+target_link_options(backu PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
 target_compile_definitions(backu PRIVATE BACKU_VERSION="${PROJECT_VERSION}")
 if(NOT BK_SANITIZE)
     # Strip at link time: the shipped artifact is the stripped one, and the
@@ -167,7 +180,7 @@ if(NOT BK_SANITIZE)
     add_executable(backu_symbols src/main.cpp ${BK_OBJECTS})
     target_include_directories(backu_symbols PRIVATE src)
     target_compile_options(backu_symbols PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
-    target_link_options(backu_symbols PRIVATE ${BK_LINK_FLAGS} -nostdlib++)
+    target_link_options(backu_symbols PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
     target_compile_definitions(backu_symbols PRIVATE BACKU_VERSION="${PROJECT_VERSION}")
     set_target_properties(backu_symbols PROPERTIES EXCLUDE_FROM_ALL ON)
 endif()

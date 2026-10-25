@@ -23,6 +23,14 @@ note "full: $FULL bytes"
 # 10.3 MB incompressible + 1.3 MB of digits (LZ4 roughly halves those).
 assert_between "$FULL" 10300000 11700000 "full backup size"
 "$BACKU" check --key key full.bk
+# Thread count changes speed, never the output: record order and nonces are
+# fixed before workers run, so the layout (hence the size) is identical.
+"$BACKU" create --key key --index-out idx-j1 -j 1 src > full-j1.bk
+"$BACKU" create --key key --index-out idx-j7 -j 7 src > full-j7.bk
+[ "$(size_of full-j1.bk)" = "$FULL" ] && [ "$(size_of full-j7.bk)" = "$FULL" ] \
+    || fail "output size depends on -j: $FULL vs $(size_of full-j1.bk) vs $(size_of full-j7.bk)"
+[ "$("$BACKU" list --key key full-j1.bk | tail -n +2)" = "$("$BACKU" list --key key full-j7.bk | tail -n +2)" ] \
+    || fail "listing depends on -j"
 
 # ---- mutate
 { printf 'INSERTED!'; cat src/data/big.bin; } > tmp && mv tmp src/data/big.bin   # 9 bytes at the start
