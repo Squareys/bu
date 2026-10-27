@@ -70,7 +70,10 @@ cuts the tail off before appending. In an encrypted chain only bu with the
 key can make a trailer that authenticates, so the first such candidate is
 the answer and a broken walk from it is damage; in an unencrypted chain a
 trailer can sit inside stored chunk data (a backup of a chain), so a
-candidate whose walk fails is skipped.
+candidate whose walk fails is skipped. Each skipped candidate costs a walk
+that may cross many segments, so a tail full of planted magic would make
+recovery quadratic: after 64 failed walks the reader stops and reports the
+chain as damaged. A real tail is one interrupted segment and needs one walk.
 
 **Locks on network file systems.** `flock` works between processes on one
 machine everywhere, and between machines on NFS (the client maps it to

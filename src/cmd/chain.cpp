@@ -171,10 +171,20 @@ bool walkFrom(const Chain& c, Window& w, u32 si, u64 end, Array<Seg>& rev, Strin
 // end, so a walk that breaks after it is damage, not a tail. Unencrypted,
 // stored chunk data may contain trailer bytes (a backup of a chain), so a
 // candidate that does not walk is only skipped.
+//
+// Each skipped candidate costs a walk that can go back through many
+// segments, so data planting magic after magic (an unencrypted chain backed
+// up into an unencrypted chain, or a hostile file) would make recovery
+// quadratic. After kMaxFailedWalks such walks the chain is called damaged
+// instead: a real tail is one interrupted segment, and finding its start
+// takes one walk.
+constexpr u32 kMaxFailedWalks = 64;
+static_assert(kMaxFailedWalks == 64, "the damage message below names the number");
 bool recoverEnd(const Chain& c, Window& w, u32 si, Array<Seg>& rev, u64& end, String& err) {
     const Source& src = c.sources[si];
     Array<u8> block;
     constexpr u32 kBlock = 1u << 20;
+    u32 failedWalks = 0;
     u64 hi = src.size;
     while (hi > kHeaderBytes + kTrailerBytes - 1) {
         const u64 lo = hi > kBlock ? hi - kBlock : 0;
@@ -191,6 +201,10 @@ bool recoverEnd(const Chain& c, Window& w, u32 si, Array<Seg>& rev, u64& end, St
             if (!c.plain) return false;
             rev.clear();
             err.clear();
+            if (++failedWalks == kMaxFailedWalks)
+                return failAt(err, src.path.view(), src.size,
+                              "no complete segment at the end, and the last 64 trailer candidates before it "
+                              "do not walk back to the start (damaged)");
         }
         if (lo == 0) break;
         hi = lo + 7;      // a magic straddling the block boundary is found in the next block
