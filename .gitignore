@@ -1,7 +1,19 @@
 # Build trees live outside the source tree (scripts/build.sh); these catch
 # an in-tree `cmake -B build` and editor/tool droppings.
 /build*/
+/.build/
 /compile_commands.json
 /.cache/
 *.bk
 *.idx
+
+# Coding-agent settings and editor state stay local.
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Core dumps from a crashing test binary.
+/core
+/core.[0-9]*
