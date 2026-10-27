@@ -200,7 +200,10 @@ bool recoverEnd(const Chain& c, Window& w, u32 si, Array<Seg>& rev, u64& end, St
     return true;
 }
 
-bool openSource(Chain& c, Source& s, String& err) {
+// `ownLock`: the caller (create) holds the chain's exclusive lock on this
+// descriptor, or on another one for the same file, and nobody else can be
+// writing it.
+bool openSource(Chain& c, Source& s, bool ownLock, String& err) {
     struct stat st;
     if (fstat(s.fd, &st) != 0) return errSet(err, s.path.view(), ": ", strerror(errno));
     s.seekable = S_ISREG(st.st_mode);
@@ -209,8 +212,17 @@ bool openSource(Chain& c, Source& s, String& err) {
         // A shared lock that cannot be had means a create is appending right
         // now: an incomplete tail is then expected, not a fault. Released at
         // once, so a long restore never makes a create wait or fail.
-        if (flock(s.fd, LOCK_SH | LOCK_NB) != 0) s.writerActive = errno == EWOULDBLOCK;
-        else flock(s.fd, LOCK_UN);
+        //
+        // Never on a descriptor whose owner holds the lock: flock locks
+        // belong to the open file description, so LOCK_SH on create's own
+        // descriptor succeeds as a downgrade and the LOCK_UN then drops
+        // create's lock, letting a second create append in the middle of
+        // the first. Probing through a fresh open() instead would only say
+        // "a writer is active" about ourselves.
+        if (!ownLock) {
+            if (flock(s.fd, LOCK_SH | LOCK_NB) != 0) s.writerActive = errno == EWOULDBLOCK;
+            else flock(s.fd, LOCK_UN);
+        }
     } else if (S_ISDIR(st.st_mode)) {
         return errSet(err, s.path.view(), ": is a directory");
     }
@@ -271,7 +283,7 @@ bool chainArgsOpen(const Array<const char*>& args, Chain& c, String& err) {
             if (s.fd < 0) return errSet(err, a, ": ", strerror(errno));
             s.own = true;
         }
-        if (!openSource(c, s, err)) return false;
+        if (!openSource(c, s, false, err)) return false;
         if (!s.seekable) {
             if (args.count != 1)
                 return errSet(err, a, ": a pipe must be the only CHAIN argument (it is read as one stream)");
@@ -287,7 +299,7 @@ bool chainFdOpen(int fd, const char* name, Chain& c, String& err) {
     Source& s = c.sources.addDefault();
     s.path.assign(StringView(name));
     s.fd = fd;
-    if (!openSource(c, s, err)) return false;
+    if (!openSource(c, s, true, err)) return false;
     return firstHeader(c, err);
 }
 

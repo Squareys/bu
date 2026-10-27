@@ -54,6 +54,11 @@ main thread writes the chain and only it takes those signals (the worker
 threads block them), so no write of ours can land after it. A merge
 replacing a chain in place holds the same lock, and a create re-checks,
 once it has the lock, that the path still names the file it opened.
+The lock lives on create's open file description until it exits; create
+reads the base through that same descriptor, so the reader's probe for an
+active writer (a shared lock taken and dropped at once, see below) is
+skipped there: on the lock holder's own description it would succeed as a
+downgrade, and the unlock would hand the chain to a second create.
 
 **What a crash leaves.** After SIGKILL or a power cut, the chain can end
 in a partial segment. A reader that finds no valid trailer at the end scans back for the

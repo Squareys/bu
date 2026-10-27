@@ -109,7 +109,9 @@ struct Chain {
 // the only argument and is read as a stream; a regular file is read by
 // seeking. `err` names the argument.
 [[nodiscard]] bool chainArgsOpen(const Array<const char*>& args, Chain& c, String& err);
-// The same for a descriptor create already holds (the chain it appends to).
+// The same for a descriptor create already holds (the chain it appends to),
+// with the chain's exclusive lock held: the descriptor is not probed for a
+// writer, which would release that lock.
 [[nodiscard]] bool chainFdOpen(int fd, const char* name, Chain& c, String& err);
 
 // Seek mode, with c.key set: walk every source back from its end, checking
