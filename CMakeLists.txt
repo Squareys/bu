@@ -176,7 +176,7 @@ set(BK_HOT_SOURCES
 set(BK_COLD_SOURCES
     src/core/thread.cpp
     src/io/io.cpp
-    src/format/container.cpp
+    src/format/segment.cpp
     src/format/snapshot.cpp
     src/format/keyfile.cpp
     src/cmd/args.cpp

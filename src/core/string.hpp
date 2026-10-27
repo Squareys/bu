@@ -1,7 +1,7 @@
 // string.hpp — owning, heap-backed byte string.
 //
 // Where ownership is genuinely needed: error messages (`String& err`), joined
-// paths, and the byte builders the container format serialises into. Always
+// paths, and the byte builders the segment format serialises into. Always
 // kept NUL-terminated so a path can go straight to open()/lstat() without a
 // copy.
 #pragma once

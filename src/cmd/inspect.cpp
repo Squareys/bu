@@ -1,16 +1,19 @@
 // inspect.cpp — the read-only subcommands: check, index, list.
 //
-// `check` is the one to run from cron. It proves, for the files given, that
-// every record authenticates under the key, that every chunk's content hashes
-// to its ID, that every snapshot's parent is present and decodes, and that
-// every chunk any snapshot references is in some given file — i.e. that a
-// restore of each snapshot would succeed, without writing anything.
+// `check` is the one to run from cron. It proves, for the chain given, that
+// every record authenticates under the key (or matches its checksum, for an
+// unencrypted chain), that every chunk's content hashes to its ID, that every
+// snapshot's parent is present and decodes, and that every chunk any snapshot
+// references is in some segment — i.e. that a restore of each snapshot would
+// succeed, without writing anything. All three commands read a chain from a
+// pipe as well as from a file, and need nothing but the stream.
 
 #include "cmd/args.hpp"
 #include "cmd/chain.hpp"
 #include "cmd/commands.hpp"
 #include "cmd/passphrase.hpp"
 #include "core/thread.hpp"
+#include "format/codec.hpp"
 
 #include <stdio.h>
 #include <time.h>
@@ -19,58 +22,130 @@ namespace bk {
 
 namespace {
 
+// Open the chain for a reading command, unlock what it needs, and read its
+// structure: in seek mode walk it (and load the tables when `tables`); in
+// stream mode read it all, handing chunk records to `sink`. `pool`, if any,
+// is started once the passphrase has been read: the prompt holds Ctrl-Z
+// back on its own thread, and a second thread would take the signal.
+// Returns the exit status on failure, kExitOk otherwise.
+int openForReading(const Args& a, const char* cmd, Chain& c, MasterKey& key, bool tables, StreamSink* sink,
+                   ThreadPool* pool = nullptr) {
+    String err;
+    if (!chainArgsOpen(a.positional, c, err)) { report(err); return kExitRuntime; }
+    if (const int rc = keyForChain(a, cmd, c.plain, c.sources[0].path.view(), key)) return rc;
+    c.key = &key;
+    if (pool) pool->init(argsJobs(a));
+    if (c.firstKind == kKindIndex && !c.stream) {
+        fprintf(stderr, "bu: %s is an index file, not a chain\n", c.sources[0].path.c_str());
+        return kExitRuntime;
+    }
+    if (c.stream) {
+        if (!chainStream(c, sink, err)) { report(err); return kExitRuntime; }
+    } else {
+        if (!chainWalk(c, err)) { report(err); return kExitRuntime; }
+        if (tables && !chainLoadTables(c, err)) { report(err); return kExitRuntime; }
+    }
+    return kExitOk;
+}
+
 // ---- check ------------------------------------------------------------------
 
 // One task per span of consecutive records (about kSpanBytes, fewer when the
-// backup is small, so every thread gets work): one pread, then each record is
-// authenticated, decoded and hashed from memory.
+// chain is small, so every thread gets work): one pread, then each record's
+// header and body are authenticated, decoded and hashed from memory.
 struct CheckSpan {
-    u32 file, first, count;
+    u32 seg, first, count;
 };
 
 struct CheckCtx {
-    const MasterKey* key = nullptr;
     const Chain* chain = nullptr;
+    ThreadPool* pool = nullptr;
     Array<CheckSpan> work;
-    u32 records = 0;
     u32 lookahead = 0;
     Array<Array<u8>> span, payload, raw;   // per worker
+    // Stream mode: what each record decoded to, compared with the tables
+    // once they have arrived (they follow the records).
+    struct Seen { u32 seg, index, rawLen; ChunkId id; };
+    Array<Seen> seen;
+    u32 seenBase = 0;
+    const StreamChunk* recs = nullptr;
     Mutex mu;
     u32 bad = 0;                     // under mu
 };
 
+void checkReport(CheckCtx& c, StringView e, u32 n = 1) {
+    Lock l(c.mu);
+    if (c.bad < 20) report(e);
+    else if (c.bad == 20) report("(further errors not shown)"_s);
+    c.bad += n;
+}
+
 void checkTask(void* ctx, u32 i, u32 worker) {
     CheckCtx& c = *static_cast<CheckCtx*>(ctx);
     const CheckSpan& s = c.work[i];
-    const Container& file = c.chain->files[s.file];
+    const Seg& seg = c.chain->segs[s.seg];
     if (i + c.lookahead < c.work.count) {
         const CheckSpan& n = c.work[i + c.lookahead];
-        containerPrefetchSpan(c.chain->files[n.file], n.first, n.count);
+        chainPrefetchSpan(*c.chain, n.seg, n.first, n.count);
     }
     String err;
     Array<u8>& span = c.span[worker];
     Array<u8>& raw = c.raw[worker];
     raw.resize(kMaxChunk);
-    u32 failures = 0;
-    if (!containerReadSpan(file, s.first, s.count, span, err)) {
-        failures = s.count;
-    } else {
-        const u64 base = file.chunks[s.first].offset;
-        for (u32 k = 0; k < s.count; ++k) {
-            const ChunkLoc& loc = file.chunks[s.first + k];
-            String e;
-            if (containerOpenChunk(*c.key, file, loc, span.ptr + (loc.offset - base), c.payload[worker], raw.ptr, e)) continue;
-            Lock l(c.mu);
-            if (c.bad < 20) report(e.view());
-            else if (c.bad == 20) report("(further errors not shown)"_s);
-            ++c.bad;
-        }
-        return;
+    if (!chainReadSpan(*c.chain, s.seg, s.first, s.count, span, err)) { checkReport(c, err.view(), s.count); return; }
+    const u64 base = seg.chunks[s.first].offset;
+    for (u32 k = 0; k < s.count; ++k) {
+        const ChunkLoc& loc = seg.chunks[s.first + k];
+        if (!chainOpenChunk(*c.chain, s.seg, s.first + k, span.ptr + (loc.offset - base), true, c.payload[worker],
+                            raw.ptr, err))
+            checkReport(c, err.view());
     }
-    Lock l(c.mu);
-    if (c.bad < 20) report(err.view());
-    else if (c.bad == 20) report("(further errors not shown)"_s);
-    c.bad += failures;
+}
+
+// Stream mode: open, decode and hash one record; note its ID and size.
+void checkStreamTask(void* ctx, u32 i, u32 worker) {
+    CheckCtx& c = *static_cast<CheckCtx*>(ctx);
+    const StreamChunk& r = c.recs[i];
+    const Seg& seg = c.chain->segs[r.seg];
+    CheckCtx::Seen& out = c.seen[c.seenBase + i];
+    out.seg = r.seg;
+    out.index = r.index;
+    out.rawLen = kInvalidIndex;
+    Array<u8>& payload = c.payload[worker];
+    Array<u8>& raw = c.raw[worker];
+    raw.resize(kMaxChunk);
+    payload.resize(r.bodyLen - kTagBytes);
+    String why;
+    u32 rawLen = 0;
+    if (!bodyOpen(seg.keys, r.nonce, kRecChunk, r.body, r.bodyLen, payload.ptr)) {
+        errSet(why, "authentication failed for a chunk record — the stream was modified or damaged");
+    } else if (!codecRawLength(payload.ptr, payload.count, kMaxChunk, rawLen)) {
+        errSet(why, "malformed chunk payload");
+    } else if (seg.keys.plain) {
+        bodyTagId(r.body, r.bodyLen, out.id);
+        if (chunkDecode(*c.chain->key, payload.ptr, payload.count, rawLen, out.id, raw.ptr, why)) out.rawLen = rawLen;
+    } else if (!codecDecode(payload.ptr, payload.count, raw.ptr, rawLen)) {
+        errSet(why, "chunk does not decompress");
+    } else {
+        chunkIdOf(*c.chain->key, raw.ptr, rawLen, out.id);
+        out.rawLen = rawLen;
+    }
+    if (out.rawLen == kInvalidIndex) {
+        String e("stdin: segment at offset "_s);
+        e.appendU64(seg.start);
+        e.append(": "_s);
+        e.append(why.view());
+        checkReport(c, e.view());
+    }
+}
+
+bool checkSink(void* ctx, Chain&, const StreamChunk* recs, u32 n, String&) {
+    CheckCtx& c = *static_cast<CheckCtx*>(ctx);
+    c.recs = recs;
+    c.seenBase = c.seen.count;
+    c.seen.resize(c.seen.count + n);
+    c.pool->run(n, checkStreamTask, &c);
+    return true;
 }
 
 void snapLabel(const Snapshot& s, char out[17]) {
@@ -134,137 +209,139 @@ void printEntries(const Snapshot& s) {
 int cmdCheck(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("check", argc, argv, first, kArgKey | kArgJobs | kArgVerbose, a)) return kExitUsage;
-    if (a.positional.count == 0) { fprintf(stderr, "bu check: name the backup files to check\n"); return kExitUsage; }
-    MasterKey key;
-    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
-    String err;
+    if (a.positional.count == 0) return usage("check", "name the CHAIN to check"_s);
+    ThreadPool pool;
+    CheckCtx c;
+    c.pool = &pool;
+    c.mu.init();
+    const u32 threads = argsJobs(a);
+    c.span.resize(threads);
+    c.payload.resize(threads);
+    c.raw.resize(threads);
+    StreamSink sink;
+    sink.fn = checkSink;
+    sink.ctx = &c;
     Chain chain;
-    if (!chainOpen(key, a.positional, chain, err)) { report(err); fprintf(stderr, "bu: check FAILED\n"); return kExitRuntime; }
+    MasterKey key;
+    c.chain = &chain;
+    if (const int rc = openForReading(a, "check", chain, key, true, &sink, &pool)) {
+        pool.shutdown();
+        if (rc == kExitRuntime) fprintf(stderr, "bu: check FAILED\n");
+        return rc;
+    }
 
     u32 problems = 0;
-    for (u32 i = 0; i < chain.snaps.count; ++i) {
+    // An incomplete tail is a problem, unless a create is appending it now.
+    chainReportTails(chain);
+    for (const Source& s : chain.sources) if (s.tail && !s.writerActive) ++problems;
+    if (chain.streamTail) ++problems;
+    if (chain.segs.count == 0) { report("no complete backup in the chain"_s); ++problems; }
+
+    String err;
+    for (u32 i = 0; i < chain.segs.count; ++i) {
         if (!chainResolve(chain, i, err)) { report(err); ++problems; continue; }
-        const u32 missing = chainCountMissing(chain, chain.snaps[i].snap);
+        const u32 missing = chainCountMissing(chain, chain.segs[i].snap);
         if (missing) {
-            fprintf(stderr, "bu: %s: snapshot references %u chunks that are in none of the given files\n",
-                    chain.files[i].path.c_str(), missing);
+            String n;
+            chainSegName(chain, i, n);
+            fprintf(stderr, "bu: %s: snapshot references %u chunks that are in none of the segments\n", n.c_str(), missing);
             ++problems;
         }
     }
 
-    CheckCtx c;
-    c.key = &key; c.chain = &chain;
-    c.mu.init();
-    ThreadPool pool;
-    pool.init(argsJobs(a));
-    u64 total = 0;
-    for (const Container& f : chain.files) total += f.fileSize;
-    const u64 target = containerSpanTarget(total, pool.threads);
-    for (u32 f = 0; f < chain.files.count; ++f) {
-        const Container& file = chain.files[f];
-        u32 ch = 0;
-        while (ch < file.chunks.count) {
-            u32 n = 1;
-            while (ch + n < file.chunks.count && containerSpanBytes(file, ch, n + 1) <= target) ++n;
-            c.work.push(CheckSpan{f, ch, n});
-            ch += n;
+    u32 records = 0;
+    for (const Seg& s : chain.segs) records += s.chunks.count;
+    if (chain.stream) {
+        // Every record that came by must be the chunk its table lists.
+        for (const CheckCtx::Seen& s : c.seen) {
+            if (s.rawLen == kInvalidIndex || s.seg >= chain.segs.count) continue;   // reported, or an incomplete tail
+            const ChunkLoc& l = chain.segs[s.seg].chunks[s.index];
+            if (!idEqual(l.id, s.id) || l.rawLen != s.rawLen) {
+                String e("stdin: segment at offset "_s);
+                e.appendU64(chain.segs[s.seg].start);
+                e.append(": a chunk record does not match the chunk table (damaged)"_s);
+                checkReport(c, e.view());
+            }
         }
-        c.records += file.chunks.count;
+    } else {
+        u64 total = 0;
+        for (const Source& s : chain.sources) total += s.size;
+        const u64 target = chainSpanTarget(total, pool.threads);
+        for (u32 si = 0; si < chain.segs.count; ++si) {
+            const Seg& s = chain.segs[si];
+            u32 ch = 0;
+            while (ch < s.chunks.count) {
+                u32 n = 1;
+                while (ch + n < s.chunks.count && chainSpanBytes(s, ch, n + 1) <= target) ++n;
+                c.work.push(CheckSpan{si, ch, n});
+                ch += n;
+            }
+        }
+        c.lookahead = chainPrefetchTasks(target, pool.threads);
+        pool.run(c.work.count, checkTask, &c);
     }
-    c.lookahead = containerPrefetchTasks(target, pool.threads);
-    c.span.resize(pool.threads);
-    c.payload.resize(pool.threads);
-    c.raw.resize(pool.threads);
-    pool.run(c.work.count, checkTask, &c);
     pool.shutdown();
     c.mu.destroy();
     problems += c.bad;
 
     if (problems) {
-        fprintf(stderr, "bu: check FAILED: %u problem%s in %u file%s\n", problems, problems == 1 ? "" : "s",
-                chain.files.count, chain.files.count == 1 ? "" : "s");
+        fprintf(stderr, "bu: check FAILED: %u problem%s in %u segment%s\n", problems, problems == 1 ? "" : "s",
+                chain.segs.count, chain.segs.count == 1 ? "" : "s");
         return kExitRuntime;
     }
     if (a.verbose)
-        fprintf(stderr, "bu: check ok: %u files, %u chunk records verified, latest snapshot generation %llu\n",
-                chain.files.count, c.records, (unsigned long long)chain.snaps[chainLatest(chain)].head.gen);
+        fprintf(stderr, "bu: check ok: %u segments, %u chunk records verified, latest snapshot generation %llu\n",
+                chain.segs.count, records, (unsigned long long)chain.segs[chainLatest(chain)].t.gen);
     return kExitOk;
 }
 
 int cmdIndex(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("index", argc, argv, first, kArgKey | kArgOut, a)) return kExitUsage;
-    if (!a.out) { fprintf(stderr, "bu index: -o INDEX is required\n"); return kExitUsage; }
-    if (a.positional.count == 0) { fprintf(stderr, "bu index: name the backup files of the chain\n"); return kExitUsage; }
-    MasterKey key;
-    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
-    String err;
+    if (!a.out) return usage("index", "-o INDEX is required"_s);
+    if (a.positional.count == 0) return usage("index", "name the CHAIN to index"_s);
     Chain chain;
-    if (!chainOpen(key, a.positional, chain, err)) { report(err); return kExitRuntime; }
+    MasterKey key;
+    if (const int rc = openForReading(a, "index", chain, key, true, nullptr)) return rc;
+    chainReportTails(chain);
+    String err;
+    if (chain.segs.count == 0) { report("no complete backup in the chain"_s); return kExitRuntime; }
     const u32 latest = chainLatest(chain);
-    if (!chainResolve(chain, latest, err)) { report(err); return kExitRuntime; }
-
     IndexData d;
-    d.snap = move(chain.snaps[latest].snap);
-    d.snap.hasParent = false;
-    indexCollectDistinct(d);
-    // Location: the file each chunk was found in (first given file holding it).
-    Array<u32> slotOf;
-    slotOf.resize(chain.files.count);
-    for (u32 i = 0; i < slotOf.count; ++i) slotOf[i] = kInvalidIndex;
-    d.location.resize(d.distinct.count);
-    for (u32 i = 0; i < d.distinct.count; ++i) {
-        u32 f, ch;
-        if (!chainFind(chain, d.distinct[i], f, ch)) {
-            fprintf(stderr, "bu: the latest snapshot references chunks in none of the given files; "
-                            "an index from it would make the next increment reference missing data\n");
-            return kExitRuntime;
-        }
-        if (slotOf[f] == kInvalidIndex) {
-            slotOf[f] = d.backups.count;
-            ChunkId& b = d.backups.addDefault();
-            memCopy(b.b, chain.files[f].keys.salt, kIdBytes);
-        }
-        d.location[i] = slotOf[f];
+    if (!chainResolve(chain, latest, err) || !chainCheckpoint(chain, latest, d.deltaBytes, d.fullBytes, err)) {
+        report(err);
+        return kExitRuntime;
     }
-    ByteWriter w;
-    indexEncode(d, w);
-    if (!indexFileWrite(key, a.out, w.buf.ptr, w.buf.count, err)) { report(err); return kExitRuntime; }
+    d.snap = move(chain.segs[latest].snap);
+    if (chainCountMissing(chain, d.snap)) {
+        fprintf(stderr, "bu: the latest snapshot references chunks in none of the segments; "
+                        "an index from it would make the next increment reference missing data\n");
+        return kExitRuntime;
+    }
+    if (!indexFileWrite(key, a.out, d, err)) { report(err); return kExitRuntime; }
     return kExitOk;
 }
 
 int cmdList(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("list", argc, argv, first, kArgKey, a)) return kExitUsage;
-    if (a.positional.count == 0) { fprintf(stderr, "bu list: name backup files (or one index file)\n"); return kExitUsage; }
-    MasterKey key;
-    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
+    if (a.positional.count == 0) return usage("list", "name a CHAIN (or one index file)"_s);
     String err;
 
-    // An index file on its own: show its snapshot and where its chunks live.
-    if (a.positional.count == 1) {
-        Container probe;
-        if (containerOpen(key, a.positional[0], probe, err) && probe.kind == kKindIndex) {
-            Array<u8> body;
+    // An index file on its own: show its snapshot.
+    if (a.positional.count == 1 && !(StringView(a.positional[0]) == "-"_s)) {
+        u16 kind = 0;
+        bool plain = false;
+        if (fileHeaderPeek(a.positional[0], kind, plain, err) && kind == kKindIndex) {
+            MasterKey key;
+            if (const int rc = keyForChain(a, "list", plain, StringView(a.positional[0]), key)) return rc;
             IndexData d;
-            if (!indexFileRead(key, a.positional[0], body, err) || !indexDecode(body.ptr, body.count, d, err)) {
-                report(err); return kExitRuntime;
-            }
+            if (!indexFileRead(key, a.positional[0], d, err)) { report(err); return kExitRuntime; }
             char label[17], when[32];
             snapLabel(d.snap, label);
             fmtTime(d.snap.createdNs, when, sizeof when);
             printf("# index: snapshot %s, generation %llu, created %s, %u entries, %u distinct chunks\n", label,
                    (unsigned long long)d.snap.gen, when, d.snap.entries.count, d.distinct.count);
-            Array<u32> perBackup;
-            perBackup.resize(d.backups.count);
-            for (u32 i = 0; i < perBackup.count; ++i) perBackup[i] = 0;
-            for (u32 l : d.location) ++perBackup[l];
-            for (u32 i = 0; i < d.backups.count; ++i) {
-                char hex[33];
-                hexEncode(d.backups[i].b, 16, hex);
-                hex[32] = 0;
-                printf("# chunks written to backup %.16s: %u\n", hex, perBackup[i]);
-            }
             printEntries(d.snap);
             return kExitOk;
         }
@@ -272,35 +349,41 @@ int cmdList(int argc, char** argv, int first) {
     }
 
     Chain chain;
-    if (!chainOpen(key, a.positional, chain, err)) { report(err); return kExitRuntime; }
+    MasterKey key;
+    if (const int rc = openForReading(a, "list", chain, key, true, nullptr)) return rc;
+    chainReportTails(chain);
+    if (chain.segs.count == 0) { report("no complete backup in the chain"_s); return kExitRuntime; }
     const u32 latest = chainLatest(chain);
-    for (u32 i = 0; i < chain.files.count; ++i) {
-        const Snapshot& h = chain.snaps[i].head;
+    for (u32 i = 0; i < chain.segs.count; ++i) {
+        if (!chainHead(chain, i, err)) { report(err); return kExitRuntime; }
+        const Seg& s = chain.segs[i];
+        const Snapshot& h = s.head;
         char label[17], parent[17], when[32], salt[17];
         snapLabel(h, label);
-        if (h.hasParent) { hexEncode(h.parent, 8, parent); parent[16] = 0; } else memCopy(parent, "(full)", 7);
-        hexEncode(chain.files[i].keys.salt, 8, salt);
+        if (h.hasParent) { hexEncode(h.parent, 8, parent); parent[16] = 0; } else memCopy(parent, "(none)", 7);
+        hexEncode(s.keys.salt, 8, salt);
         salt[16] = 0;
         fmtTime(h.createdNs, when, sizeof when);
-        // A digest of the chunk table (IDs, record and raw lengths, nonces, in
-        // file order): two backups of the same tree under the same key have
-        // the same one whatever -j was, which is how the tests check that the
+        // A digest of the chunk table (IDs, record and raw lengths, in file
+        // order): two backups of the same tree under the same key have the
+        // same one whatever -j was, which is how the tests check that the
         // output does not depend on thread scheduling.
         ByteWriter t;
-        for (const ChunkLoc& l : chain.files[i].chunks) {
-            t.bytes(l.id.b, kIdBytes); t.varint(l.recLen); t.varint(l.rawLen); t.varint(l.nonce);
-        }
+        for (const ChunkLoc& l : s.chunks) { t.bytes(l.id.b, kIdBytes); t.varint(l.recLen); t.varint(l.rawLen); t.varint(l.nonce); }
         u8 digest[32];
         blake3Hash(t.buf.ptr, t.buf.count, digest);
         char dhex[17];
         hexEncode(digest, 8, dhex);
         dhex[16] = 0;
-        printf("# %s: backup %s, snapshot %s, parent %s, generation %llu, created %s, %u chunk records (table %s)%s\n",
-               chain.files[i].path.c_str(), salt, label, parent, (unsigned long long)h.gen, when,
-               chain.files[i].chunks.count, dhex, i == latest ? "  <- latest" : "");
+        String name;
+        chainSegName(chain, i, name);
+        printf("# %s: segment %s, snapshot %s, parent %s, generation %llu, %s, created %s, %u chunk records "
+               "(table %s)%s\n",
+               name.c_str(), salt, label, parent, (unsigned long long)h.gen, h.delta ? "delta" : "self-contained", when,
+               s.chunks.count, dhex, i == latest ? "  <- latest" : "");
     }
     if (!chainResolve(chain, latest, err)) { report(err); return kExitRuntime; }
-    printEntries(chain.snaps[latest].snap);
+    printEntries(chain.segs[latest].snap);
     return kExitOk;
 }
 

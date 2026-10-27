@@ -19,12 +19,12 @@ namespace bk {
 
 namespace {
 
-// Same trick as the container magic: CR LF ^Z make a newline-converting copy
+// Same trick as the segment magic: CR LF ^Z make a newline-converting copy
 // fail at the magic instead of somewhere in a slot.
 constexpr u8 kMagic[8] = {'B', 'U', 'K', 'E', 'Y', '\r', '\n', 0x1a};
 constexpr StringView kOldPrefix = "bu-key-1 "_s;
 // BLAKE3 derive_key context for the key ID (hardcoded, globally unique; a
-// format constant like the container contexts).
+// format constant like the segment contexts).
 constexpr StringView kCtxKeyId = "bu 2026-10-27 key file key id v2"_s;
 
 constexpr u32 kIdBytesKF = 16;

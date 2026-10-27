@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-bu — backup utility: encrypted, deduplicating, incremental backups as a Unix
-filter, in one small native binary. Read `docs/design.md` before changing behaviour
+bu — backup utility: encrypted, deduplicating, incremental backups in one
+chain file per data set, in one small native binary. Read `docs/design.md` before changing behaviour
 and `docs/format.md` before touching anything that reads or writes bytes on
 disk.
 
@@ -50,18 +50,20 @@ configuration.
    and every composition is documented in `docs/design.md` §Crypto. Any change
    to key derivation, nonces or associated data is a format change: bump the
    version, update `docs/format.md`, add a test that old files are refused.
-7. **Nonces never repeat under one key.** Every container has its own random
+7. **Nonces never repeat under one key.** Every segment has its own random
    salt and so its own AES key; within it, chunk nonces are stream sequence
-   numbers (`< 2^63`) and metadata nonces are fixed values with the top bit set.
-   Never add a record without a nonce from one of those two spaces.
+   numbers (`< 2^63`), metadata nonces are fixed values with the top bit set,
+   and record headers use `2^63 + 2^62 + ordinal`. Never add a record without
+   a nonce from one of those three spaces.
 8. **Everything read from a backup is untrusted, authenticated or not.**
    Decoders use `ByteReader` (bounds-checked, sticky failure), cap every count
    before allocating, and validate paths (`pathIsSafe`). Restore resolves
    every path component with `O_NOFOLLOW` from the target directory's fd.
-9. **Nothing refers to a backup by file name.** Parents are found by snapshot
-   ID, chunks by chunk ID, across whatever files the user gives. This is what
-   keeps chains valid after a merge; do not add a dependency on names, salts
-   or order of arguments.
+9. **Nothing refers to a segment by file name or offset.** Parents are found
+   by snapshot ID, chunks by chunk ID, across whatever segments the user
+   gives; offsets inside a segment are relative to its start. This is what
+   keeps chains valid after a merge and after `cat`; do not add a dependency
+   on names, positions, salts or order of arguments.
 10. **The output does not depend on thread scheduling.** Record order and
     nonces are fixed before work is handed to threads; the in-order writer
     decides dedupe. `tests/integration/01-incremental.sh` checks the chunk-table
@@ -69,9 +71,12 @@ configuration.
 11. **CLI input is refused by name, never guessed.** Unknown, repeated,
     valueless or out-of-range options exit 2 with the option named; runtime
     failures exit 1; success 0. `create` with warnings (unreadable files) exits
-    1 but leaves a valid backup and index.
-12. **No network code.** bu reads and writes files and stdio. S3, SSH and
-    the like are the caller's pipe.
+    1 but leaves a valid chain.
+12. **No network code.** bu reads and writes file descriptors: files on any
+    mount, and stdio. S3, SSH and the like are the caller's mount or pipe.
+13. **A chain is never left half-written by bu.** `create` holds the chain's
+    lock while appending and truncates back on every failure path it can
+    see; readers must survive the partial tail a crash leaves.
 
 ## Conventions
 

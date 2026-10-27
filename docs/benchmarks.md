@@ -51,7 +51,7 @@ writeback).
 | read: tar \| cat | `tar -cf - data \| cat > /dev/null` | serial read of the tree, the classic tool |
 | read: N streams, tree | a small C reader (compiled by the script): `read(2)` into a 1 MiB buffer, N files at a time | what parallel reads get from the source |
 | read: O_DIRECT big files | `dd iflag=direct bs=4M` | the device, no page cache (no root needed for the raw device: it reads files) |
-| read: backup file | the C reader on `full.bk` | reading the backup, for `check` and `restore` |
+| read: backup file | the C reader on `full.bu` | reading the backup, for `check` and `restore` |
 | write: O_DIRECT | `dd oflag=direct bs=4M` from a RAM file | the device's write speed |
 | write: buffered + fsync | `dd conv=fsync bs=4M` | the same through the page cache |
 | copy: cp -a | `cp -a --reflink=never` | a plain copy |

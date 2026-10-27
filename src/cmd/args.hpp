@@ -25,7 +25,7 @@ enum ArgFlag : u32 {
     kArgJobs = 1u << 3,         // -j N
     kArgNoCache = 1u << 4,      // --no-files-cache
     kArgDir = 1u << 5,          // -C DIR
-    kArgPath = 1u << 6,         // --path PREFIX
+    kArgIndex = 1u << 6,        // --index INDEX
     kArgOut = 1u << 7,          // -o FILE
     kArgVerbose = 1u << 8,      // -v
     kArgPassFile = 1u << 9,     // --passphrase-file FILE
@@ -36,6 +36,7 @@ enum ArgFlag : u32 {
     kArgKdfTime = 1u << 14,     // --kdf-time PASSES
     kArgKdfTargetMs = 1u << 15, // --kdf-target-ms MS
     kArgSlot = 1u << 16,        // --slot N
+    kArgNoKey = 1u << 17,       // --no-key
 };
 // Every command that unlocks a key file takes both passphrase sources; with
 // neither, it asks on the terminal.
@@ -48,7 +49,7 @@ struct Args {
     const char* base = nullptr;
     const char* indexOut = nullptr;
     const char* dir = nullptr;
-    const char* path = nullptr;
+    const char* index = nullptr;
     const char* out = nullptr;
     const char* passFile = nullptr;
     const char* newPassFile = nullptr;
@@ -60,16 +61,23 @@ struct Args {
     u32 slot = kInvalidIndex;        // kInvalidIndex = not given
     u32 jobs = 0;                    // 0 = online CPU count
     bool noCache = false;
+    bool noKey = false;
     bool verbose = false;
     Array<const char*> positional;   // never null entries
+    u32 dashDash = kInvalidIndex;    // positional count before a "--", if one was given
 };
 
 // Parse argv[first..argc) for subcommand `cmd`, accepting the options in
-// `allowed` (kArgKey brings kArgPass with it). On a usage error prints "bu CMD: message" and returns false.
+// `allowed` (kArgKey brings kArgPass with it). --key and --no-key exclude
+// each other, and the passphrase options need --key. Whether a key is
+// required is the command's business (create always; readers when the chain
+// is encrypted). On a usage error prints "bu CMD: message" and returns false.
 [[nodiscard]] bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, Args& out);
 
-// Print "bu: message" (or "bu CMD: message") to stderr.
+// Print "bu: message" to stderr.
 void report(StringView msg);
+// Print "bu CMD: message" and the help hint to stderr; returns kExitUsage.
+int usage(const char* cmd, StringView msg);
 
 // Jobs to use: -j, or the online CPU count.
 u32 argsJobs(const Args& a);

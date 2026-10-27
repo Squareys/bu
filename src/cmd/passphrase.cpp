@@ -12,7 +12,7 @@
 // handler code for the same outcome a moment earlier.
 //
 // mlock is not used. The master key is needed for the whole run and is
-// expanded into per-container key schedules that the worker threads share;
+// expanded into per-segment key schedules that the worker threads share;
 // locking the passphrase buffer alone would protect the least valuable
 // secret, and locking all of it would need RLIMIT_MEMLOCK beyond the
 // default. Swap exposure is the swap's to solve (encrypted swap). Every
@@ -185,6 +185,27 @@ bool unlockKeyForCommand(const Args& a, MasterKey& out) {
         report(msg);
     }
     return ok;
+}
+
+int keyForChain(const Args& a, const char* cmd, bool plain, StringView what, MasterKey& out) {
+    String msg(what);
+    if (plain) {
+        if (a.key) {
+            msg.append(" is not encrypted (made with --no-key); drop --key"_s);
+            return usage(cmd, msg.view());
+        }
+        masterKeyPlain(out);
+        return kExitOk;
+    }
+    if (a.noKey) {
+        msg.append(" is encrypted; give --key KEYFILE, not --no-key"_s);
+        return usage(cmd, msg.view());
+    }
+    if (!a.key) {
+        msg.append(" is encrypted: --key KEYFILE is required"_s);
+        return usage(cmd, msg.view());
+    }
+    return unlockKeyForCommand(a, out) ? kExitOk : kExitRuntime;
 }
 
 } // namespace bk

@@ -25,7 +25,7 @@ constexpr u32 kKeyBytes = 32;    // master key, subkeys, AES-256 keys
 constexpr u32 kIdBytes = 16;     // chunk ID: 128-bit keyed BLAKE3 (docs/design.md §IDs)
 constexpr u32 kTagBytes = 16;    // GCM tag
 constexpr u32 kNonceBytes = 12;  // GCM nonce
-constexpr u32 kSaltBytes = 32;   // per-file salt in every container header
+constexpr u32 kSaltBytes = 32;   // per-segment salt in every segment header
 
 struct Key { u8 b[kKeyBytes]; };
 struct ChunkId { u8 b[kIdBytes]; };
@@ -37,12 +37,17 @@ inline u64 idHash(const ChunkId& id) { u64 h; memCopy(&h, id.b, 8); return h; }
 
 // True when the CPU has everything the AES-GCM path is compiled for (AES-NI,
 // PCLMULQDQ, AVX — libsodium's aesni file targets all three). On false, `err`
-// names the missing feature. Every command that touches a container calls it
+// names the missing feature. Every command that encrypts or decrypts calls it
 // before the first encryption, so the failure is a sentence, not SIGILL.
 bool cryptoCpuCheck(String& err);
 
 // Unkeyed BLAKE3, 32-byte output (tests and the key-file checksum).
 void blake3Hash(const void* data, usize n, u8 out[32]);
+// BLAKE3 over the concatenation of `n` parts, `outLen` bytes: keyed under
+// `key`, or unkeyed when `key` is null (the integrity checks and chunk IDs of
+// unencrypted chains, docs/design.md §3).
+struct HashPart { const void* ptr; usize len; };
+void blake3Parts(const Key* key, const HashPart* parts, u32 n, u8* out, usize outLen);
 // Keyed BLAKE3 with arbitrary output length (chunk IDs, header check values).
 void blake3Keyed(const Key& key, const void* data, usize n, u8* out, usize outLen);
 // BLAKE3 derive_key: `context` must be a hardcoded, globally unique string

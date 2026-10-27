@@ -229,18 +229,18 @@ rm -rf "$DST/xout" "$DST/x.tar"
 
 echo "== bu"
 sleep 1.1   # the tree's ctimes past the files-cache race guard of the full backup
-case_ "bu create -j 1" "$TOTAL" 'rm -f "$DST/full.bk" "$DST/idx"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx" -j 1 data > "$DST/full.bk"'
-case_ "bu create" "$TOTAL" 'rm -f "$DST/full.bk" "$DST/idx"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx" data > "$DST/full.bk"'
-FULLBYTES=$(stat -c %s "$DST/full.bk")
+case_ "bu create -j 1" "$TOTAL" 'rm -f "$DST/full.bu" "$DST/idx"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx" -j 1 "$DST/full.bu" data'
+case_ "bu create" "$TOTAL" 'rm -f "$DST/full.bu" "$DST/idx"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx" "$DST/full.bu" data'
+FULLBYTES=$(stat -c %s "$DST/full.bu")
 sleep 1.1   # past the files-cache race guard
-case_ "bu increment, unchanged" "0" 'rm -f "$DST/u.bk" "$DST/idx-u"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --base "$DST/idx" --index-out "$DST/idx-u" data > "$DST/u.bk"'
-case_ "bu restore -j 1" "$TOTAL" 'rm -rf "$DST/out"' '"$BU" restore --key "$RAM/key" --passphrase-file "$RAM/pass" -C "$DST/out" -j 1 "$DST/full.bk"'
-case_ "bu restore" "$TOTAL" 'rm -rf "$DST/out"' '"$BU" restore --key "$RAM/key" --passphrase-file "$RAM/pass" -C "$DST/out" "$DST/full.bk"'
+case_ "bu increment, unchanged" "0" 'rm -f "$DST/u.bu" "$DST/idx-u"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --base "$DST/idx" --index-out "$DST/idx-u" "$DST/u.bu" data'
+case_ "bu restore -j 1" "$TOTAL" 'rm -rf "$DST/out"' '"$BU" restore --key "$RAM/key" --passphrase-file "$RAM/pass" -C "$DST/out" -j 1 "$DST/full.bu"'
+case_ "bu restore" "$TOTAL" 'rm -rf "$DST/out"' '"$BU" restore --key "$RAM/key" --passphrase-file "$RAM/pass" -C "$DST/out" "$DST/full.bu"'
 diff -rq "$SRC/data" "$DST/out/data" >/dev/null || { echo "bench_io.sh: restored tree differs" >&2; exit 1; }
 rm -rf "$DST/out"
-case_ "read: backup file" "$FULLBYTES" ":" '"$RAM/preadall" "$DST/full.bk"'
-case_ "bu check -j 1" "$FULLBYTES" ":" '"$BU" check --key "$RAM/key" --passphrase-file "$RAM/pass" -j 1 "$DST/full.bk"'
-case_ "bu check" "$FULLBYTES" ":" '"$BU" check --key "$RAM/key" --passphrase-file "$RAM/pass" "$DST/full.bk"'
+case_ "read: backup file" "$FULLBYTES" ":" '"$RAM/preadall" "$DST/full.bu"'
+case_ "bu check -j 1" "$FULLBYTES" ":" '"$BU" check --key "$RAM/key" --passphrase-file "$RAM/pass" -j 1 "$DST/full.bu"'
+case_ "bu check" "$FULLBYTES" ":" '"$BU" check --key "$RAM/key" --passphrase-file "$RAM/pass" "$DST/full.bu"'
 
 # 1% of the files changed: every 100th file of the sorted list (from the
 # 51st on, so none of the four big files: 236 files of ~100 KiB and 8 KiB),
@@ -256,8 +256,8 @@ for p in files[50::100]:
     with open(p, "wb") as h: h.write(rnd.randbytes(n))
 PY
 sleep 1.1   # the changed files' ctime past the race guard of the next base
-case_ "bu increment, 1% of files" "0" 'rm -f "$DST/f.bk" "$DST/idx-f"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --base "$DST/idx" --index-out "$DST/idx-f" -v data > "$DST/f.bk" 2> "$RAM/f.log"'
-FILES_INFO="$(grep -o '[0-9]* files read ([^)]*)' "$RAM/f.log" || true), increment $(stat -c %s "$DST/f.bk") bytes"
+case_ "bu increment, 1% of files" "0" 'rm -f "$DST/f.bu" "$DST/idx-f"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --base "$DST/idx" --index-out "$DST/idx-f" -v "$DST/f.bu" data 2> "$RAM/f.log"'
+FILES_INFO="$(grep -o '[0-9]* files read ([^)]*)' "$RAM/f.log" || true), increment $(stat -c %s "$DST/f.bu") bytes"
 echo "   ($FILES_INFO)"
 
 # 1% scattered change, on top of the previous one (base: its index): 4 KiB
@@ -281,8 +281,8 @@ for f in small[::100]:
     with open(p, "wb") as h: h.write(rnd.randbytes(n))
 PY
 sleep 1.1
-case_ "bu increment, 1% scattered" "0" 'rm -f "$DST/inc.bk" "$DST/idx-i"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --base "$DST/idx-f" --index-out "$DST/idx-i" -v data > "$DST/inc.bk" 2> "$RAM/inc.log"'
-INC_INFO="$(grep -o '[0-9]* files read ([^)]*)' "$RAM/inc.log" || true), increment $(stat -c %s "$DST/inc.bk") bytes"
+case_ "bu increment, 1% scattered" "0" 'rm -f "$DST/inc.bu" "$DST/idx-i"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --base "$DST/idx-f" --index-out "$DST/idx-i" -v "$DST/inc.bu" data 2> "$RAM/inc.log"'
+INC_INFO="$(grep -o '[0-9]* files read ([^)]*)' "$RAM/inc.log" || true), increment $(stat -c %s "$DST/inc.bu") bytes"
 echo "   ($INC_INFO)"
 rm -rf "$SRC/data" "$DST"/*
 
@@ -295,9 +295,9 @@ if [ "$SINGLE" = 1 ]; then
     fi
     case_ "1f copy: cp" "$SIZE" 'rm -f "$DST/big.bin"' 'cp --reflink=never "$SRC/one/big.bin" "$DST/big.bin"'
     rm -f "$DST/big.bin"
-    case_ "1f bu create -j 1" "$SIZE" 'rm -f "$DST/one.bk" "$DST/idx1"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx1" -j 1 one > "$DST/one.bk"'
-    case_ "1f bu create" "$SIZE" 'rm -f "$DST/one.bk" "$DST/idx1"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx1" one > "$DST/one.bk"'
-    case_ "1f bu restore" "$SIZE" 'rm -rf "$DST/out"' '"$BU" restore --key "$RAM/key" --passphrase-file "$RAM/pass" -C "$DST/out" "$DST/one.bk"'
+    case_ "1f bu create -j 1" "$SIZE" 'rm -f "$DST/one.bu" "$DST/idx1"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx1" -j 1 "$DST/one.bu" one'
+    case_ "1f bu create" "$SIZE" 'rm -f "$DST/one.bu" "$DST/idx1"' 'cd "$SRC" && "$BU" create --key "$RAM/key" --passphrase-file "$RAM/pass" --index-out "$DST/idx1" "$DST/one.bu" one'
+    case_ "1f bu restore" "$SIZE" 'rm -rf "$DST/out"' '"$BU" restore --key "$RAM/key" --passphrase-file "$RAM/pass" -C "$DST/out" "$DST/one.bu"'
     cmp -s "$SRC/one/big.bin" "$DST/out/one/big.bin" || { echo "bench_io.sh: restored file differs" >&2; exit 1; }
     rm -rf "$SRC/one" "$DST"/*
 fi

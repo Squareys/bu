@@ -1,5 +1,15 @@
 // create.cpp — `bu create`: walk, read, chunk, dedupe, compress, encrypt,
-// stream to stdout; then write the new index.
+// append one segment to a chain (or stream it to a pipe).
+//
+// WHERE IT GOES. CHAIN is a chain file: create locks it, reads its latest
+// snapshot from the tail (the base: dedupe set, delta base and files cache in
+// one), appends a segment with O_APPEND and fsyncs. Any failure — a write
+// error, SIGINT, SIGTERM, SIGHUP — truncates the file back to where the
+// segment began, so a chain never holds half a segment that bu wrote and
+// gave up on; only SIGKILL or a crash can leave one, and readers skip it
+// (chain.hpp). CHAIN `-` on a pipe streams the segment instead, with the
+// base from an index file (--base) and the next one written by --index-out:
+// the pipe cannot be read back.
 //
 // THE PIPELINE. After a metadata-only walk, the file data flows through four
 // stages connected by bounded rings, so memory is capped no matter how big
@@ -27,7 +37,7 @@
 // therefore a function of the input tree, the key and the salt; thread count
 // and scheduling only change how fast it appears.
 //
-// THE FILES CACHE. With --base, a regular file whose (dev, ino, size,
+// THE FILES CACHE. With a base, a regular file whose (dev, ino, size,
 // mtime_ns, ctime_ns) all equal the base snapshot's entry for the same path
 // is not opened at all: its chunk list is copied from the base. ctime is
 // compared too because it cannot be set from user space — `touch -d` can put
@@ -40,12 +50,12 @@
 
 #include "chunk/chunker.hpp"
 #include "cmd/args.hpp"
+#include "cmd/chain.hpp"
 #include "cmd/commands.hpp"
 #include "cmd/passphrase.hpp"
 #include "core/sort.hpp"
 #include "core/thread.hpp"
 #include "format/codec.hpp"
-#include "format/container.hpp"
 #include "format/snapshot.hpp"
 
 #include <dirent.h>
@@ -54,6 +64,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -248,12 +259,12 @@ struct Block {
 
 struct Job {
     const u8* raw = nullptr;   // inside blocks[block]
-    u8* rec = nullptr;         // sealed record (slot-owned buffer)
+    u8* rec = nullptr;         // the record: kRecPrefix bytes, then the sealed body (slot-owned)
     u64 seq = 0;
     u32 block = 0;
     u32 item = 0;
     u32 rawLen = 0;
-    u32 recLen = 0;            // 0: duplicate, nothing to write
+    u32 recLen = 0;            // body length; 0: duplicate, nothing to write
     ChunkId id;
     u8 state = 0;
 };
@@ -263,7 +274,7 @@ constexpr u8 kJobFree = 0, kJobQueued = 1, kJobDone = 2;
 struct Pipe {
     const Walk* walk = nullptr;
     const MasterKey* key = nullptr;
-    const ContainerKeys* ckeys = nullptr;
+    const SegKeys* ckeys = nullptr;
 
     Mutex mu;
     Cond readerCv, chunkerCv, workerCv, writerCv;
@@ -611,7 +622,7 @@ void* workerMain(void* arg) {
         u32 recLen = 0;
         if (!dup) {
             const u32 n = codecEncode(*st, j.raw, j.rawLen, payload.ptr);
-            recLen = recordSeal(*p.ckeys, j.seq, kRecChunk, &j.id, payload.ptr, n, j.rec);
+            recLen = bodySeal(*p.ckeys, j.seq, kRecChunk, &j.id, payload.ptr, n, j.rec + kRecPrefix);
         }
 
         p.mu.lock();
@@ -633,10 +644,10 @@ struct Stats {
 };
 
 // The writer: in sequence order, store first occurrences, record every ref.
-// The writer: in sequence order, store first occurrences, record every ref.
-// It takes every finished job at the head of the ring in one lock round and
-// writes their records with one writev, then frees the slots together.
-void writerLoop(Pipe& p, ContainerWriter& cw, Array<ChunkId>& refs, Array<u32>& itemFirst,
+// It takes every finished job at the head of the ring in one lock round,
+// seals each stored record's header (its ordinal is known only here) and
+// writes the records with one writev, then frees the slots together.
+void writerLoop(Pipe& p, SegWriter& cw, Array<ChunkId>& refs, Array<u32>& sizes, Array<u32>& itemFirst,
                 Array<u32>& itemCount, Stats& stats) {
     constexpr u32 kBatch = 64;
     IoSlice vec[kBatch];
@@ -666,8 +677,7 @@ void writerLoop(Pipe& p, ContainerWriter& cw, Array<ChunkId>& refs, Array<u32>& 
         for (u32 k = 0; k < n; ++k) {
             const Job& j = p.jobs[(p.written + k) % p.slots];
             if (store[k]) {
-                vec[nv++] = IoSlice{j.rec, j.recLen};
-                writerNoteChunk(cw, j.id, j.seq, j.rawLen, j.recLen);
+                vec[nv++] = IoSlice{j.rec, writerChunk(cw, j.id, j.seq, j.rawLen, j.rec, j.recLen)};
                 ++stats.newChunks;
             }
             ++stats.chunks;
@@ -675,6 +685,7 @@ void writerLoop(Pipe& p, ContainerWriter& cw, Array<ChunkId>& refs, Array<u32>& 
             if (itemCount[j.item] == 0) itemFirst[j.item] = refs.count;
             ++itemCount[j.item];
             refs.push(j.id);
+            sizes.push(j.rawLen);
         }
         cw.out->writeVec(vec, nv);
         const bool failed = cw.out->failed;
@@ -698,33 +709,159 @@ void fmtBytes(u64 n, char* buf, usize cap) {
     else snprintf(buf, cap, "%llu B", (unsigned long long)n);
 }
 
+
+
+// ---- where the segment goes -------------------------------------------------
+
+// The signal handler's view of an append in progress: SIGINT, SIGTERM or
+// SIGHUP truncates the chain back to where the segment began and then dies
+// of the signal as it would have. Only the main thread writes the chain and
+// only it takes these signals (the worker threads block them), so no write
+// of ours can land after the truncate.
+volatile sig_atomic_t gTruncFd = -1;
+off_t gTruncTo = 0;
+
+void onFatalSignal(int sig) {
+    if (gTruncFd >= 0) (void)ftruncate(gTruncFd, gTruncTo);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+constexpr int kFatalSignals[] = {SIGINT, SIGTERM, SIGHUP};
+
+// The chain being appended to, or the pipe being streamed to.
+struct Target {
+    const char* name = nullptr;   // for messages
+    int fd = -1;                  // written to
+    int readFd = -1;              // read from (seek mode; the same fd, or a reopen of stdout)
+    bool own = false, ownRead = false;
+    bool seek = false;            // a regular file: lock, base from its tail, truncate on failure
+    u64 size = 0;                 // seek: where the new segment begins
+
+    ~Target() {
+        if (ownRead && readFd >= 0) close(readFd);
+        if (own && fd >= 0) close(fd);
+    }
+};
+
+// Lock the chain (exclusively, without waiting: a second create on the same
+// chain is a mistake to report, not to queue). A filesystem without locks
+// gets a warning: then nothing stops two writers.
+bool lockChain(Target& t) {
+    if (flock(t.fd, LOCK_EX | LOCK_NB) == 0) return true;
+    if (errno == EWOULDBLOCK) {
+        fprintf(stderr, "bu: %s is locked: another bu is writing it (create or merge); try again when it is done\n", t.name);
+        return false;
+    }
+    fprintf(stderr, "bu: warning: %s: cannot lock (%s); make sure no other bu writes this chain at the same time\n",
+            t.name, strerror(errno));
+    return true;
+}
+
+// Open CHAIN for appending, locked. A merge that replaced the file (rename)
+// while we waited for nothing in particular leaves our descriptor on the old
+// inode: compare with the path after locking and start over if it moved.
+int openTarget(const char* chainArg, Target& t) {
+    t.name = chainArg;
+    if (StringView(chainArg) == "-"_s) {
+        t.name = "stdout";
+        if (isatty(1)) {
+            fprintf(stderr, "bu create: refusing to write a backup to a terminal; name a CHAIN file or redirect stdout\n");
+            return kExitUsage;
+        }
+        struct stat st;
+        if (fstat(1, &st) != 0) { fprintf(stderr, "bu: stdout: %s\n", strerror(errno)); return kExitRuntime; }
+        t.fd = 1;
+        if (!S_ISREG(st.st_mode)) { pipeGrow(1); return kExitOk; }
+        t.seek = true;
+        if (!lockChain(t)) return kExitRuntime;
+        // `>> chain` opens stdout write-only: read the chain through a second
+        // descriptor. Writes go to the end (O_APPEND, or a seek for `1<>`).
+        const int mode = fcntl(1, F_GETFL);
+        if ((mode & O_ACCMODE) == O_WRONLY) {
+            t.readFd = open("/proc/self/fd/1", O_RDONLY | O_CLOEXEC);
+            if (t.readFd < 0) { fprintf(stderr, "bu: cannot read the chain on stdout back: %s\n", strerror(errno)); return kExitRuntime; }
+            t.ownRead = true;
+        } else {
+            t.readFd = 1;
+        }
+        if (!(mode & O_APPEND) && lseek(1, 0, SEEK_END) < 0) { fprintf(stderr, "bu: stdout: %s\n", strerror(errno)); return kExitRuntime; }
+        t.size = u64(st.st_size);
+        return kExitOk;
+    }
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        t.fd = open(chainArg, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        if (t.fd < 0) { fprintf(stderr, "bu: %s: %s\n", chainArg, strerror(errno)); return kExitRuntime; }
+        t.own = true;
+        struct stat st, now;
+        if (fstat(t.fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            fprintf(stderr, "bu create: %s is not a regular file (to write to a pipe, name CHAIN as -)\n", chainArg);
+            return kExitUsage;
+        }
+        if (!lockChain(t)) return kExitRuntime;
+        if (stat(chainArg, &now) == 0 && now.st_dev == st.st_dev && now.st_ino == st.st_ino) {
+            fstat(t.fd, &st);
+            t.seek = true;
+            t.readFd = t.fd;
+            t.size = u64(st.st_size);
+            return kExitOk;
+        }
+        close(t.fd);
+        t.fd = -1;
+        t.own = false;
+    }
+    fprintf(stderr, "bu: %s keeps being replaced while create opens it\n", chainArg);
+    return kExitRuntime;
+}
+
 } // namespace
 
 int cmdCreate(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("create", argc, argv, first, kArgKey | kArgBase | kArgIndexOut | kArgJobs | kArgNoCache | kArgVerbose, a))
         return kExitUsage;
-    if (!a.indexOut) {
-        fprintf(stderr, "bu create: --index-out INDEX is required (the next increment is made from it; "
-                        "it may be the same file as --base)\n");
-        return kExitUsage;
-    }
-    if (a.positional.count == 0) { fprintf(stderr, "bu create: name at least one PATH to back up\n"); return kExitUsage; }
-    if (isatty(1)) {
-        fprintf(stderr, "bu create: refusing to write a backup to a terminal; redirect stdout to a file or a pipe\n");
-        return kExitUsage;
-    }
+    if (!a.key && !a.noKey) return usage("create", "give --key KEYFILE (encrypted) or --no-key (unencrypted)"_s);
+    if (a.positional.count < 2) return usage("create", "name the CHAIN and at least one PATH to back up"_s);
+    const char* chainArg = a.positional[0];
     // A pipe reader that goes away (aws s3 cp failing) must become a write
     // error we report — and a run that does NOT write the index — not a
     // silent death by SIGPIPE.
     signal(SIGPIPE, SIG_IGN);
 
+    Target t;
+    if (const int rc = openTarget(chainArg, t)) return rc;
     String err;
+    Chain chain;
+    bool chainPlain = a.noKey;
+    if (t.seek && t.size) {
+        if (a.base) {
+            fprintf(stderr, "bu create: %s already holds backups and is its own base; --base is for writing "
+                            "a new segment to an empty file or a pipe\n", t.name);
+            return kExitUsage;
+        }
+        if (!chainFdOpen(t.readFd, t.name, chain, err)) { report(err); return kExitRuntime; }
+        if (chain.firstKind != kKindSegment) {
+            fprintf(stderr, "bu: %s is an index file, not a chain\n", t.name);
+            return kExitRuntime;
+        }
+        chainPlain = chain.plain;
+    } else if (a.base) {
+        u16 kind = 0;
+        if (!fileHeaderPeek(a.base, kind, chainPlain, err)) { report(err); return kExitRuntime; }
+    }
+    if (chainPlain != a.noKey) {
+        String m(StringView(t.size ? t.name : a.base));
+        m.append(chainPlain ? " is not encrypted (made with --no-key); use --no-key, not --key"_s
+                            : " is encrypted; use --key KEYFILE, not --no-key"_s);
+        return usage("create", m.view());
+    }
+
     MasterKey key;
-    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
+    if (a.noKey) masterKeyPlain(key);
+    else if (!unlockKeyForCommand(a, key)) return kExitRuntime;
     // Fail before reading a byte if the index cannot be written: discovering
     // it after streaming a 100 GB backup would leave a backup with no index.
-    {
+    if (a.indexOut) {
         String probe(StringView(a.indexOut));
         probe.append(".probe.");
         probe.appendU64(u64(getpid()));
@@ -736,14 +873,33 @@ int cmdCreate(int argc, char** argv, int first) {
 
     const i64 startNs = nowNs();
     IndexData base;
-    const bool haveBase = a.base != nullptr;
-    if (haveBase) {
-        Array<u8> body;
-        if (!indexFileRead(key, a.base, body, err) || !indexDecode(body.ptr, body.count, base, err)) {
-            report(err); return kExitRuntime;
+    bool haveBase = false;
+    if (t.seek && t.size) {
+        chain.key = &key;
+        if (!chainWalkTail(chain, err)) { report(err); return kExitRuntime; }
+        const Source& src = chain.sources[0];
+        if (src.tail) {
+            // An interrupted create's partial segment: cut it off (we hold
+            // the lock, so nobody is writing it).
+            if (ftruncate(t.fd, off_t(src.size)) != 0) { fprintf(stderr, "bu: %s: %s\n", t.name, strerror(errno)); return kExitRuntime; }
+            fprintf(stderr, "bu: %s: removed %llu bytes of an incomplete backup at the end (an interrupted create)\n",
+                    t.name, (unsigned long long)src.tail);
+            t.size = src.size;
         }
-        snapshotIndexPaths(base.snap);
+        if (chain.segs.count) {
+            const u32 last = chain.segs.count - 1;
+            if (!chainResolve(chain, last, err) || !chainCheckpoint(chain, last, base.deltaBytes, base.fullBytes, err)) {
+                report(err); return kExitRuntime;
+            }
+            base.snap = move(chain.segs[last].snap);
+            indexCollectDistinct(base);
+            haveBase = true;
+        }
+    } else if (a.base) {
+        if (!indexFileRead(key, a.base, base, err)) { report(err); return kExitRuntime; }
+        haveBase = true;
     }
+    if (haveBase) snapshotIndexPaths(base.snap);
     HashIndex baseIdx;
     baseIdx.init(base.distinct.count);
     for (u32 i = 0; i < base.distinct.count; ++i) baseIdx.insert(idHash(base.distinct[i]), i);
@@ -752,13 +908,14 @@ int cmdCreate(int argc, char** argv, int first) {
     Walk w;
     w.base = &base;
     w.useCache = haveBase && !a.noCache;
-    // `bu create . > ./today.bk` must not back up its own output while
-    // writing it: remember stdout's inode if it is a regular file.
+    // A chain inside the tree it backs up must not back itself up while
+    // growing: remember its inode.
     {
         struct stat out;
-        if (fstat(1, &out) == 0 && S_ISREG(out.st_mode)) { w.skipDev = u64(out.st_dev); w.skipIno = u64(out.st_ino); w.skipOut = true; }
+        if (fstat(t.fd, &out) == 0 && S_ISREG(out.st_mode)) { w.skipDev = u64(out.st_dev); w.skipIno = u64(out.st_ino); w.skipOut = true; }
     }
-    for (const char* rootArg : a.positional) {
+    for (u32 pi = 1; pi < a.positional.count; ++pi) {
+        const char* rootArg = a.positional[pi];
         String stored;
         if (!storedName(StringView(rootArg), stored)) {
             fprintf(stderr, "bu create: '%s' contains a '..' component; cd to its parent and name it from there\n", rootArg);
@@ -809,7 +966,7 @@ int cmdCreate(int argc, char** argv, int first) {
     // takes more readers than the queue depth the disk wants: on an NVMe, 8
     // instead of 4 made a full backup of a tree of small files 1.3-1.5x
     // faster and of one big file 1.4x. More than 8 measured no better.
-    const u32 recCap = codecBound(kMaxChunk) + kRecordOverhead;
+    const u32 recCap = kRecPrefix + codecBound(kMaxChunk) + kTagBytes;
     Array<u8> jobMem;
     jobMem.resize(p.slots * recCap);
     Array<Job> jobs;
@@ -818,18 +975,41 @@ int cmdCreate(int argc, char** argv, int first) {
     p.jobs = jobs.ptr;
 
     OutStream out;
-    out.init(1);
-    ContainerWriter cw;
-    if (!writerBegin(cw, out, key, err)) { report(err); return kExitRuntime; }
+    out.init(t.fd);
+    SegWriter cw;
+    if (t.seek) {
+        gTruncTo = off_t(t.size);
+        gTruncFd = t.fd;
+        for (int sig : kFatalSignals) signal(sig, onFatalSignal);
+    }
+    // Truncate the chain back and report; for every failure from here on.
+    auto abandon = [&](StringView what) {
+        if (t.seek) {
+            gTruncFd = -1;
+            if (ftruncate(t.fd, off_t(t.size)) != 0)
+                fprintf(stderr, "bu: %s: could not remove the partial backup: %s\n", t.name, strerror(errno));
+        }
+        report(what);
+        if (t.seek) fprintf(stderr, "bu: %s is unchanged\n", t.name);
+        return kExitRuntime;
+    };
+    if (!writerBegin(cw, out, key, kKindSegment, err)) return abandon(err.view());
     p.ckeys = &cw.keys;
 
     Array<ChunkId> newRefs;
+    Array<u32> newSizes;
     Array<u32> itemFirst, itemCount;
     itemFirst.resize(w.reads.count);
     itemCount.resize(w.reads.count);
     for (u32 i = 0; i < w.reads.count; ++i) { itemFirst[i] = 0; itemCount[i] = 0; }
     Stats stats;
 
+    // The threads block the fatal signals (they inherit this mask), so the
+    // handler always runs on this thread, never during another's write.
+    sigset_t fatal, old;
+    sigemptyset(&fatal);
+    for (int sig : kFatalSignals) sigaddset(&fatal, sig);
+    pthread_sigmask(SIG_BLOCK, &fatal, &old);
     Thread chunker;
     Array<Thread> readerThreads, pool;
     readerThreads.resize(readers);
@@ -840,22 +1020,25 @@ int cmdCreate(int argc, char** argv, int first) {
         if (!readerThreads[readersStarted].start(readerMain, &p)) { Lock l(p.mu); --p.readersRunning; break; }
         ++readersStarted;
     }
-    if (readersStarted == 0 || !chunker.start(chunkerMain, &p)) {
-        report("cannot start threads"_s); return kExitRuntime;
-    }
-    for (u32 i = 0; i < workers; ++i) {
-        if (!pool[started].start(workerMain, &p)) break;
-        ++started;
-    }
-    if (started == 0) { report("cannot start worker threads"_s); return kExitRuntime; }
-    writerLoop(p, cw, newRefs, itemFirst, itemCount, stats);
+    const bool chunkerUp = readersStarted > 0 && chunker.start(chunkerMain, &p);
+    if (chunkerUp)
+        for (u32 i = 0; i < workers; ++i) {
+            if (!pool[started].start(workerMain, &p)) break;
+            ++started;
+        }
+    pthread_sigmask(SIG_SETMASK, &old, nullptr);
+    if (!chunkerUp || started == 0) return abandon("cannot start threads"_s);
+    writerLoop(p, cw, newRefs, newSizes, itemFirst, itemCount, stats);
     for (u32 i = 0; i < readersStarted; ++i) readerThreads[i].join();
     chunker.join();
     for (u32 i = 0; i < started; ++i) pool[i].join();
 
     if (out.failed) {
-        fprintf(stderr, "bu: writing the backup to stdout failed: %s (index not written)\n", strerror(out.savedErrno));
-        return kExitRuntime;
+        String m("writing the backup to "_s);
+        m.append(StringView(t.name));
+        m.append(" failed: "_s);
+        m.append(StringView(strerror(out.savedErrno)));
+        return abandon(m.view());
     }
 
     // ---- assemble the snapshot in entry order
@@ -871,18 +1054,20 @@ int cmdCreate(int argc, char** argv, int first) {
             if (w.cacheFrom[i] != kInvalidIndex) {
                 const Entry& b = base.snap.entries[w.cacheFrom[i]];
                 fin.refs.appendRange(base.snap.refs.ptr + b.firstRef, b.refCount);
+                fin.sizes.appendRange(base.snap.sizes.ptr + b.firstRef, b.refCount);
                 e.refCount = b.refCount;
             } else {
                 const u32 it = w.readItem[i];
                 if (p.itemFailed[it]) continue;     // unreadable: left out (warned)
                 fin.refs.appendRange(newRefs.ptr + itemFirst[it], itemCount[it]);
+                fin.sizes.appendRange(newSizes.ptr + itemFirst[it], itemCount[it]);
                 e.refCount = itemCount[it];
                 e.size = p.itemBytes[it];           // differs only if it shrank (warned by the reader)
             }
         }
         fin.entries.push(e);
     }
-    if (!randomBytes(fin.id, kSnapshotIdBytes, err)) { report(err); return kExitRuntime; }
+    if (!randomBytes(fin.id, kSnapshotIdBytes, err)) return abandon(err.view());
     fin.gen = haveBase ? base.snap.gen + 1 : 1;
     fin.createdNs = startNs;
     if (haveBase) {
@@ -890,40 +1075,40 @@ int cmdCreate(int argc, char** argv, int first) {
         memCopy(fin.parent, base.snap.id, kSnapshotIdBytes);
     }
 
+    // A delta manifest, unless the deltas since the last self-contained one
+    // would then outweigh it: a reader resolving the snapshot reads at most
+    // about twice a full manifest, however long the chain (design.md §5).
     ByteWriter manifest;
-    snapshotEncode(fin, haveBase ? &base.snap : nullptr, manifest);
-    if (!writerFinish(cw, manifest.buf.ptr, manifest.buf.count, err)) { report(err); return kExitRuntime; }
-
-    // ---- the new index: this snapshot, self-contained, plus locations
-    IndexData idx;
-    idx.snap = move(fin);
-    idx.snap.hasParent = false;
-    indexCollectDistinct(idx);
-    ChunkId self;
-    memCopy(self.b, cw.keys.salt, kIdBytes);
-    Array<u32> remap;                    // base backup slot -> new slot
-    remap.resize(base.backups.count);
-    for (u32 i = 0; i < remap.count; ++i) remap[i] = kInvalidIndex;
-    idx.backups.push(self);
-    idx.location.resize(idx.distinct.count);
-    for (u32 i = 0; i < idx.distinct.count; ++i) {
-        const ChunkId& id = idx.distinct[i];
-        u32 loc = 0;
-        if (!setContains(p.committed, p.committedIds, id)) {
-            u32 slot = kInvalidIndex, v;
-            while ((v = baseIdx.next(idHash(id), slot)) != kInvalidIndex)
-                if (idEqual(base.distinct[v], id)) break;
-            if (v != kInvalidIndex && base.location.count) {
-                const u32 old = base.location[v];
-                if (remap[old] == kInvalidIndex) { remap[old] = idx.backups.count; idx.backups.push(base.backups[old]); }
-                loc = remap[old];
-            }
+    bool delta = haveBase;
+    if (haveBase) {
+        snapshotEncode(fin, &base.snap, manifest);
+        if (base.deltaBytes + manifest.buf.count > base.fullBytes) {
+            manifest.buf.clear();
+            delta = false;
         }
-        idx.location[i] = loc;
     }
-    ByteWriter ib;
-    indexEncode(idx, ib);
-    if (!indexFileWrite(key, a.indexOut, ib.buf.ptr, ib.buf.count, err)) { report(err); return kExitRuntime; }
+    if (!delta) snapshotEncode(fin, nullptr, manifest);
+    if (!writerFinish(cw, manifest.buf.ptr, manifest.buf.count, fin.gen, err)) return abandon(err.view());
+    if (t.seek && fsync(t.fd) != 0) {
+        String m(StringView(t.name));
+        m.append(": fsync: "_s);
+        m.append(StringView(strerror(errno)));
+        return abandon(m.view());
+    }
+    gTruncFd = -1;     // the segment is complete: an interrupt now keeps it
+
+    // ---- the index, when asked for: this snapshot, self-contained
+    if (a.indexOut) {
+        IndexData idx;
+        idx.deltaBytes = delta ? base.deltaBytes + manifest.buf.count : 0;
+        idx.fullBytes = delta ? base.fullBytes : manifest.buf.count;
+        idx.snap = move(fin);
+        if (!indexFileWrite(key, a.indexOut, idx, err)) {
+            report(err);
+            fprintf(stderr, "bu: the backup was written, the index was not\n");
+            return kExitRuntime;
+        }
+    }
 
     if (a.verbose) {
         u32 cachedFiles = 0;
@@ -936,7 +1121,7 @@ int cmdCreate(int argc, char** argv, int first) {
         fprintf(stderr,
                 "bu: %u entries, %u files read (%s), %u from files cache (%s)\n"
                 "bu: %llu chunks, %llu new; wrote %s in %.2f s (%.0f MiB/s read) with %u workers\n",
-                idx.snap.entries.count, w.reads.count, b1, cachedFiles, b2,
+                w.snap.entries.count, w.reads.count, b1, cachedFiles, b2,
                 (unsigned long long)stats.chunks, (unsigned long long)stats.newChunks, b3, secs,
                 secs > 0 ? double(stats.rawRead) / secs / double(1 << 20) : 0.0, started);
     }

@@ -81,6 +81,7 @@ struct ThreadPool {
     u32 active = 0;       // helpers currently inside the batch
     u64 generation = 0;   // bumps per batch so a helper never runs one twice
     bool stopping = false;
+    bool started = false;  // init ran; shutdown of a pool never started does nothing
 
     void init(u32 threadCount);
     void shutdown();

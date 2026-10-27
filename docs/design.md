@@ -1,8 +1,8 @@
 # bu design
 
 bu makes deduplicated, compressed, authenticated-encrypted incremental
-backups with one small binary and no server, no repository directory and no
-network code. This document says why it is built the way it is. The byte
+backups into one chain file per data set, with one small binary and no
+server, no repository directory and no network code. This document says why it is built the way it is. The byte
 layout is in [format.md](format.md).
 
 ## 1. Model
@@ -11,19 +11,115 @@ There are three kinds of file:
 
 - the **key file**: a random 32-byte master key, stored only wrapped under
   one or more passphrases (§3, *The key file*);
-- **backup files**: one per `create` (or `merge`), written to stdout;
-- the **index**: a small local file describing the latest snapshot, which the
-  next `create` needs instead of the previous backup.
+- **chains**: a full backup and the increments after it, as **segments**
+  laid end to end in one file (or in several, one segment each);
+- **index files**, optional: the latest snapshot of a chain, for writing the
+  next segment somewhere the chain cannot be read back from.
 
-A **chain** is a full backup (or a merged file) followed by increments. bu
-never needs to know where backups are stored: `create` and `merge` stream to
-stdout, so `> file`, `| aws s3 cp - s3://...` and `| ssh host 'cat > x'` are
-all the same to it. Reading commands (`restore`, `check`, `list`, `index`,
-`merge`) take files on disk and may seek. Reading the whole previous backup
-to make an increment is never necessary; the index is.
+Each segment contains exactly one **snapshot** (a file tree) and the chunks
+that snapshot needed that its base did not have. A full backup and its
+increments are useless apart, so they live together: `bu create CHAIN PATH`
+on a new file writes a full backup, and on an existing chain appends an
+increment, taking its base (dedupe set, delta base and files cache) from
+the chain's own tail.
 
-Each backup file contains exactly one **snapshot** (a file tree) and the
-chunks that snapshot needed that the base did not have.
+### Chain files
+
+**A segment is self-contained.** It has its own header, salt and key, its
+records, and a fixed 64-byte **trailer** at its end: the segment's length,
+where its manifest and its chunk table are, the snapshot's generation, a
+check value and a magic. Every offset is relative to the segment's first
+byte. Two consequences:
+
+- A reader finds the segments from the end of the file. The trailer gives
+  the last segment's length, so its start; the bytes before that end with
+  the previous segment's trailer. The walk must land exactly on offset 0.
+  Reading a chain's structure costs one small read per segment, and the
+  window bu reads around each trailer (256 KiB) usually holds the table, the
+  manifest and the header of a small segment, and the trailer before it.
+- Segments written separately are a chain once concatenated: `cat a.bu
+  b.bu > c.bu` gives the same bytes as appending b to a.
+  A segment does not record where it sits, so there is nothing to
+  validate or rewrite; what holds a chain together is the snapshot IDs
+  (an increment names its parent's) and the chunk IDs, as before.
+
+**Appending.** `create` opens the chain with `O_APPEND`, takes an
+exclusive `flock` (failing at once, by name, when another bu holds it: a
+second backup of the same chain at the same time is a mistake to report,
+not to queue), reads the base from the tail, writes the segment and
+fsyncs. On a write error, SIGINT, SIGTERM or SIGHUP, create truncates the
+file back to where the segment began, so a chain keeps no half segment
+that bu gave up on. The signal handler does the truncate; only the
+main thread writes the chain and only it takes those signals (the worker
+threads block them), so no write of ours can land after it. A merge
+replacing a chain in place holds the same lock, and a create re-checks,
+once it has the lock, that the path still names the file it opened.
+
+**What a crash leaves.** After SIGKILL or a power cut, the chain can end
+in a partial segment. A reader that finds no valid trailer at the end scans back for the
+trailer magic and takes the last position from which a walk to offset 0
+succeeds; it reads the chain up to there and says how many bytes it skips.
+`check` counts the tail as a problem (unless a create holds the lock at
+that moment: then the tail is a backup being written). The next `create`
+cuts the tail off before appending. In an encrypted chain only bu with the
+key can make a trailer that authenticates, so the first such candidate is
+the answer and a broken walk from it is damage; in an unencrypted chain a
+trailer can sit inside stored chunk data (a backup of a chain), so a
+candidate whose walk fails is skipped.
+
+**Locks on network file systems.** `flock` works between processes on one
+machine everywhere, and between machines on NFS (the client maps it to
+NFS locks). sshfs and rclone mounts (FUSE) and SMB without the right mount
+options only lock locally: two machines appending to one chain there can
+interleave their segments into garbage. Give each machine its own chain.
+Where `flock` fails outright (`ENOLCK`), create warns and goes on.
+
+### Where chains live
+
+bu reads and writes through file descriptors and never opens a network
+connection. Whether a descriptor can seek decides how a chain is read, never
+a flag:
+
+- **Seek mode**, a regular file: a path on a local disk, NFS, SMB, sshfs,
+  or an object store through `rclone mount`; or `-` when stdin is a file.
+  Readers walk the trailers, read the tables, and then only the chunk
+  records they need, in spans sorted by offset (§9).
+- **Stream mode**, a pipe on stdin: `ssh host cat chain.bu | bu ...`. The
+  records are read once, front to back. `check` and `list` need nothing
+  else. `restore` needs the snapshot before the data arrives, and the
+  chain's manifests sit at the end of each segment, so it takes an index
+  (`--index`). `merge` refuses a pipe: what it keeps is decided by the
+  latest snapshot, at the end of the chain.
+
+`create` writes to a chain file, to stdout when it is a file (`>> chain`
+appends like a path), or to a pipe (`| aws s3 cp - ...`), which it cannot
+read back: there the base comes from an index (`--base`) and the next one
+is written with `--index-out`. That is also the way to keep **one object
+per segment** where appending is impossible or costly (S3 objects are
+immutable; rclone re-uploads a modified file whole): each increment goes to
+a new file or object, and the reading commands take the files in order.
+On a pipe bu raises the pipe buffer to 1 MiB (`F_SETPIPE_SZ`), so each side
+wakes once per MiB instead of per 64 KiB.
+
+### Rejected
+
+- *A separate index file next to every chain* (bu 0.1.0's model): two files
+  that must stay in step, and the index lived on the machine making the
+  backups. The chain's tail holds the same information; the index stays for
+  pipes and object stores.
+- *tar as the container*: tar has no index (a reader scans every member
+  header to find anything), cannot authenticate its structure, and its
+  members are files, not chunks shared across increments. A tail index
+  would have to be bolted on anyway.
+- *A chain-end pointer in the first header*, patched after each append:
+  breaks `cat`, needs a writable non-append descriptor, and on object
+  stores rewrites the first byte of a huge file.
+- *Chunk nonces in the clear* (so a stream reader needs no record header):
+  the gaps between the stored sequence numbers show where unchanged data
+  lies between changed chunks: for a database, which pages changed.
+  *Random nonces in the clear*: no leak, but uniqueness only with high
+  probability; the record header keeps it by construction for 25 bytes per
+  record.
 
 ## 2. Chunking
 
@@ -127,35 +223,71 @@ the risk 2^-49 prices.
 The master key `K` never touches data. Everything is derived with BLAKE3
 `derive_key`, each purpose under its own hardcoded context string:
 
-- `K_id` from `K` alone (IDs must agree across all backups for dedupe);
-- per container, a **fresh random 32-byte salt** in the header, and from
-  `K ‖ salt` the AES-256 key and the header-check key.
+- `K_id` from `K` alone (IDs must agree across all segments for dedupe);
+- per segment, a **fresh random 32-byte salt** in the header, and from
+  `K ‖ salt` the AES-256 key and the check key.
 
-So every file — every backup, every merge output, every index — has its own
-AES key. Within a file the 96-bit GCM nonce is a 64-bit counter:
+So each segment (an increment, a merge output, an index) has its own AES
+key. Within a segment the 96-bit GCM nonce is a 64-bit counter,
+from one of three spaces that cannot meet:
 
-- chunk records use their **stream sequence number**, assigned by the chunker
-  in cut order before any worker sees the chunk; it is unique by construction
-  and stays below 2^63;
-- metadata records use fixed values with bit 63 set (manifest, trailer,
-  index), disjoint from chunk nonces.
+- chunk bodies use their **stream sequence number**, assigned by the
+  chunker in cut order before any worker sees the chunk; it is unique by
+  construction and stays below 2^63;
+- metadata bodies use fixed values with bit 63 set (manifest, table, index);
+- **record headers** use 2^63 + 2^62 + the record's ordinal in the segment.
 
 A nonce therefore never repeats under one key, without any state shared
 between runs and without relying on random nonces (whose collision bound,
 2^-32 after 2^32 messages, would be uncomfortably close for a tool that may
 write billions of chunks under one master key). Merge re-encrypts every chunk
-it keeps under the new file's key with new sequence numbers.
+it keeps under the new segment's key with new sequence numbers.
 
-The **associated data** of every record is its type byte and its chunk ID
-(zeros for metadata). A record cannot be replayed as another type or under
-another ID, and the nonce binds it to its position class. On top of the tag,
-a reader recomputes the keyed hash of every decoded chunk and compares it
-with the ID, which is what makes it safe for `merge` and `restore` to take a
-chunk by ID from whichever file has it.
+**The record header.** Every record starts with 25 sealed bytes: its type
+and its body's nonce. A reader that seeks has both from the table and
+skips them (`check` verifies them). A reader streaming a segment from a
+pipe meets the chunk records before the table, and the sequence numbers
+have gaps where duplicates were dropped, so it could not guess them; it
+counts records instead, and the header, sealed under that count, tells it
+the rest. The writer seals the headers itself, in order, once it knows
+which chunks it stores: 9 bytes of AES-GCM per record, nothing next to the
+workers' work. Reordering, dropping or duplicating records in a stream
+breaks the count.
+
+The **associated data** of a body is its type byte. A record cannot be
+replayed as another type, and the nonce binds it to its place. A chunk is
+bound to its ID by content: a reader recomputes the keyed hash of every
+decoded chunk and compares it with the ID it was looking for (the table's,
+or, streaming, the one the snapshot wants), which is what makes it safe for
+`merge` and `restore` to take a chunk by ID from whichever segment has it.
+(bu 0.1.0 also put the ID in the associated data; a stream reader does not
+know it before decrypting, and the hash check binds it anyway.)
 
 The **header check** (keyed BLAKE3 of the header under a salt-derived key)
 distinguishes "wrong key" from "damaged file" before any decryption, and
-authenticates the version and kind fields.
+authenticates the version, kind and flags. The **trailer check** (keyed
+BLAKE3 of header and trailer) authenticates the segment's length, the
+offsets of its metadata and its generation: a walk back through a chain
+only follows trailers made with the key.
+
+### Unencrypted chains
+
+`bu create --no-key` writes segments with header flag bit 0 set and the
+same layout, minus encryption: payloads in the clear, chunk IDs as unkeyed
+BLAKE3, and every 16-byte tag a checksum (unkeyed BLAKE3 of nonce, type and
+payload; for a chunk, its ID, which the reader re-hashes). Readers see the
+flag and need no key. This **detects damage, not tampering**: anyone can
+write a valid unencrypted chain, or edit one and recompute the checksums.
+It is for data that is not secret, on storage you trust, where a key file
+is one more thing to lose.
+
+There is no silent default: `create` needs `--key` or `--no-key`. A chain
+is one or the other; appending the other kind, or reading a concatenation
+of both, is refused. A reader given `--key` refuses an unencrypted chain,
+so an attacker cannot replace an encrypted chain with an unencrypted one of
+their own making and have it restored, as long as scripts pass `--key`.
+Unencrypted segments need neither AES-NI nor a key file, so they also work
+on CPUs bu otherwise refuses.
 
 ### The key file
 
@@ -268,9 +400,9 @@ interactive; a lock file would be one more thing to go stale.
 
 **Memory hygiene.** The passphrase, the KEK and its AES schedule, and `K` are
 wiped (`explicit_bzero`) on every path once used; `MasterKey` wipes itself on
-destruction, and so do the derived per-container keys (`Container`,
-`ContainerWriter`). `mlock` is not used: `K` lives for the whole run and is
-expanded into one AES schedule per container, which the worker threads read
+destruction, and so do the derived per-segment keys (`SegKeys`, wherever
+they are copied). `mlock` is not used: `K` lives for the whole run and is
+expanded into one AES schedule per segment, which the worker threads read
 in place, so locking only the passphrase buffer would protect the least
 valuable secret, and
 locking all of it would need more than the default `RLIMIT_MEMLOCK`. Swap is
@@ -310,7 +442,10 @@ compress logs better and halve create throughput.
 A snapshot is encoded as entries in walk order (depth-first, siblings sorted
 by name), paths prefix-coded against the previous entry, every integer a
 varint. Entries carry type, mode, uid, gid, mtime and ctime (ns), dev, inode,
-size, a symlink target, and a file's chunk list.
+size, a symlink target, and a file's chunk list, each chunk with its size.
+The sizes (a varint per new chunk) make a snapshot say where every chunk
+goes on its own; a restore from a pipe needs that, because each segment's
+table, which also has them, arrives after its data.
 
 **Delta encoding.** An increment's manifest is encoded against its parent
 snapshot. Every entry is still listed (a deleted file is simply absent), but
@@ -324,13 +459,25 @@ chunk IDs (4 MB); with it, one `COPY`. Measured on the benchmark tree, an
 increment of an unchanged 1 GB / 3 090-file tree is 43 KB, ~14 bytes per file.
 
 Decoding a delta needs the parent snapshot, which is looked up by its random
-16-byte snapshot ID among the files given — never by file name.
+16-byte snapshot ID among the segments given, never by file name or
+offset.
+
+**Checkpoints.** Deltas chain: resolving the latest snapshot reads every
+manifest back to a self-contained one. To bound that, `create` writes a
+self-contained manifest instead of a delta when the delta bytes since the
+last self-contained one would exceed its size. Resolving then reads at most
+about twice a full manifest, however long the chain, and the checkpoints
+cost at most as much again as the deltas. A self-contained manifest keeps
+its parent's ID (for lineage), with a flag saying it needs no parent to
+decode. The counters travel in the index for increments written to pipes.
 
 ## 6. The index and the files cache
 
-The index is **the latest snapshot itself**, self-contained (no delta), plus an
-advisory table of which backup file each chunk was written to. One structure
-serves three purposes:
+The base of an increment is **the latest snapshot itself**. `create`
+appending to a chain reads it from the chain's tail (walking back only as
+far as the last checkpoint needs); an index file is the same snapshot,
+self-contained, for an increment written to a pipe or to a separate file.
+One structure serves three purposes:
 
 - **dedupe set:** the chunks the next increment may reference without storing
   are exactly the chunks the latest snapshot references;
@@ -355,43 +502,71 @@ reappears two increments later, its chunks are stored again. This is
 deliberate: it is what makes merge safe (§7) and keeps the index the size of
 one snapshot.
 
-A lost index is rebuilt from the chain with `bu index`; because manifests
-carry dev/ino/ctime too, the rebuilt index has the files cache intact.
+`bu index` writes the index of a chain's latest snapshot; because manifests
+carry dev/ino/ctime too, it has the files cache intact. bu 0.1.0's index
+also had a table of which backup file held each chunk; nothing used it,
+and it is gone.
 
 ## 7. Merge
 
-`merge FILES... > out` writes one backup containing **the chain's latest
-snapshot, fully expanded, and exactly the chunks it references**. Older
-snapshots are not kept: history is what keeping old files is for, and one
-snapshot per file keeps the format and every command simple.
+`merge -o NEW CHAIN...` writes a chain of one segment containing **the
+chain's latest snapshot, fully expanded, and exactly the chunks it
+references**. Older snapshots are not kept: history is what keeping the old
+chain is for, and one snapshot per segment keeps the format and every
+command simple. It reads the chain like restore (spans of nearby records,
+§9) and needs a file, not a pipe.
 
 The merged snapshot **keeps its snapshot ID and generation**. The input must
 reach back to a full backup (the output is self-contained); every chunk is
 authenticated and re-hashed on the way through and re-sealed under the new
-file's key without recompression.
+segment's key without recompression. An unencrypted chain merges to an
+unencrypted one.
+
+**Rotation.** `bu merge -o chain.bu chain.bu` compacts a chain in place: the
+output goes to a temp file beside it and is renamed over it, under the
+chain's lock, so a create cannot slip a segment in that the rename would
+drop. To keep history instead, merge into a new file and append to that
+from then on (`bu merge -o 2026-11.bu 2026-10.bu`): the old chain stays as
+it was, and the new one starts from a full segment of the latest state
+without reading the source data again.
 
 **Why later increments keep working.** Write `S_k` for the snapshot of
 increment *k* and `R(S)` for the chunks it references. Increment *k+1* is made
-from the index of `S_k`, so it references only chunks in `R(S_k)` (the index's
-dedupe set *is* `R(S_k)`) or chunks it stores itself, and its manifest names
-`S_k`'s ID as parent. `merge(…, inc_k)` contains exactly `R(S_k)` and `S_k`
-under its original ID. So inc *k+1* resolves against the merged file with no
-reference to the files it replaced. By induction this holds for any sequence
+from the base `S_k` (the chain's tail or its index), so it references only
+chunks in `R(S_k)` (the base's dedupe set *is* `R(S_k)`) or chunks it stores
+itself, and its manifest names `S_k`'s ID as parent. `merge(…, inc_k)`
+contains exactly `R(S_k)` and `S_k` under its original ID. So inc *k+1*
+resolves against the merged segment with no reference to the segments it
+replaced. By induction this holds for any sequence
 of merges and increments, and for increments made before or after a merge.
-Integration test 02 runs a three-step chain merged twice with increments in
-between.
+Integration test 02 runs a chain compacted in place with increments
+appended after it, and a chain of separate files merged a prefix at a
+time.
 
-Chains are a list of files in any order; the latest snapshot is the one with
-the highest generation (ties: the file named last).
+A chain may be given as several files, normally in order; segments are
+found by ID, so the order matters only for ties. The latest snapshot is the
+one with the highest generation, read from the trailers (ties: the later
+segment). `create` appending to a chain takes its last segment's snapshot
+as the base.
 
 ## 8. Restore and check
 
 `restore` resolves the latest snapshot (recursively through parents), counts
-missing chunks **before writing anything**, then restores files in batches:
-each chunk is an independent task — `pread`, GCM-open, decompress, verify the
-ID, `pwrite` at its offset — on a thread pool. Files are created with
-`ftruncate` to their size first, and all-zero chunks are not written, so
-sparse files stay sparse. Directories get their final mode and mtime last.
+missing chunks **before writing anything**, then restores files in batches
+on a thread pool, reading the chain in spans (§9). PATHs after `--` restore
+those files and directories only, and only their chunks are read. Files are
+created with `ftruncate` to their size first, and all-zero chunks are not
+written, so sparse files stay sparse. Directories get their final mode and
+mtime last.
+
+**From a pipe** the snapshot comes from `--index`, which must be one of the
+stream's snapshots (bu says so when it is not the latest). Every file is
+created and sized first; then each chunk record is opened, decoded and
+hashed on the pool as it streams past, and the chunks the snapshot uses are
+written to every place they go, in one pass with nothing staged on disk.
+Missing chunks show only at the end, and are reported then. Files are
+opened again to be written, with `O_NOFOLLOW`, and refused unless they are
+still the inode restore created.
 
 Every path is resolved component by component with `O_NOFOLLOW` from the
 target directory's descriptor, missing parents are created, and symlinks are
@@ -414,8 +589,10 @@ privilege) is kept.
 byte but `/` and NUL, and one carrying escape sequences must not drive the
 terminal of whoever lists the backup.
 
-`check` authenticates every record of every file, re-hashes every chunk,
-resolves every snapshot and confirms every reference is present.
+`check` authenticates every record of every segment (headers included),
+re-hashes every chunk, resolves every snapshot and confirms every reference
+is present. From a pipe it does the same in one pass, and compares each
+segment's table with the records that came before it.
 
 ## 9. Parallelism, I/O and performance
 
@@ -461,26 +638,33 @@ resolves every snapshot and confirms every reference is present.
 **Determinism.** Sequence numbers (and so nonces and record order) are fixed
 by the chunker; dedupe is decided by the in-order writer. Thread count and
 scheduling change only the speed: the chunk table of a backup is the same for
-`-j 1` and `-j 7` (test 01 compares digests; the files differ only by salt).
+`-j 1` and `-j 7` (test 01 compares digests; the segments differ only by salt).
 
 No `mmap` (a file truncated while mapped raises SIGBUS), no io_uring (with
 1 MiB reads the syscall rate is ~3 000/s per GB/s, nothing to win, and it
 would cost size and complexity). Output goes through a 4 MiB buffer or
 `writev`, with EINTR and partial writes handled; SIGPIPE is ignored so a dead
-pipe reader is a reported error and the index is not updated.
+pipe reader is a reported error and the index is not updated. The writer
+seals each stored record's header in that `writev` loop: only it knows the
+record's ordinal, and a 9-byte seal per record is lost in the noise (a
+1 GiB tree backs up as fast as before on tmpfs).
 
-`restore`, `check` and `merge` use a thread pool over independent tasks.
-`restore` and `check` read the backup in **spans**: runs of consecutive
-records (about 256 KiB) read with one `pread` and opened from memory. Each
+`restore`, `check` and `merge` use a thread pool over independent tasks and
+read the chain in **spans**: runs of nearby records of one segment (about
+256 KiB) read with one `pread` and opened from memory. Each
 task also asks the kernel (`POSIX_FADV_WILLNEED`) for the span about 16 MiB
 ahead, so the disk keeps a deep queue of large reads whatever `-j` is.
 Reading one ~20 KiB record per `pread` from many threads at scattered
 offsets ran at half the disk's sequential speed; spans of 256 KiB measured
 better than 1-2 MiB (less CPU, and more tasks to spread over threads). A
 full backup restores as long runs of consecutive records because the
-snapshot lists chunks in the order `create` wrote them; deduplicated chunks
-and increments break the runs, and a chunk that does not continue the
-current span starts a new one. `merge` still reads one record at a time.
+snapshot lists chunks in the order `create` wrote them. Restore sorts each
+batch's chunks by their place in the chain, so chunks of one segment that
+increments scattered across the tree come back together, and a span may
+read through up to 64 KiB of records nobody needs rather than split: on a
+network mount a round trip costs more than the bytes. A chunk used in
+several places (all-zero pages) is decoded once per span. `merge` builds
+its spans the same way, in output order.
 
 `restore` gathers decoded chunks that continue each other in one output file
 into one `pwrite` (up to 1 MiB) and overlaps two batches of files: the main
@@ -497,11 +681,11 @@ time.
 is read up to the size the walk saw. One that grew or shrank by the time it
 is opened is backed up anyway (what is there, up to the walked size) with a
 "changed size" warning; one that cannot be opened or read is left out with a
-warning. Either way `create` exits 1 while the backup and index stay valid,
-which is Borg's convention for "completed with warnings". A backup written
-into the tree it is backing up (`bu create . > x.bk`) skips its own output
-file by inode, and an index location that cannot be written is refused
-before anything is read.
+warning. Either way `create` exits 1 while the segment is complete and the
+chain valid, which is Borg's convention for "completed with warnings". A
+chain inside the tree it is backing up (`bu create x.bu .`) skips itself by
+inode, and an index location that cannot be written is refused before
+anything is read.
 
 ### Measurements
 
@@ -549,18 +733,18 @@ and create from 2.01 s to 1.69 s.
 
 ## 10. Size
 
-Stripped binary: **238 808 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **273 272 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
 |---|---|
 | BLAKE3 (portable + SSE4.1 + AVX2 + AVX-512, -O3) | 64 114 |
 | Argon2id + BLAKE2b (libsodium, ref + SSSE3 + AVX2 + AVX-512F kernels, -O3) | 32 377 |
-| AES-256-GCM (libsodium AES-NI, -O3) | 21 236 |
+| AES-256-GCM (libsodium AES-NI, -O3) | 21 323 |
 | LZ4 (inlined into codecEncode/codecDecode) | 8 510 |
-| bu hot path (-O2) | 4 269 |
-| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 81 028 |
-| crt and runtime glue | 5 277 |
+| bu hot path (-O2) | 4 279 |
+| bu cold path: CLI, key file, walk, pipeline, chains, manifest, restore, merge (-Oz) | 109 900 |
+| crt and runtime glue | 6 678 |
 
 The remaining ~21 KB of the file are ELF headers, dynamic-linking tables
 (`.dynsym`, `.dynstr`, relocations for the ~90 glibc symbols used) and
@@ -573,6 +757,10 @@ buys more passes or memory in the same two seconds. The security fixes
 after it (safe temp files, restore hardening, escaped listings, warnings)
 added 3 KB of cold code. The read-path work (spans, prefetch, merged writes
 and the overlapped batches in restore, eight readers in create) added 4.5 KB.
+Chain files added 34.5 KB of cold code: finding segments from the end and
+past an interrupted append, the stream reader and stream restore, record
+headers, locking and truncate-on-failure, in-place merge with spans,
+unencrypted segments, and the longer help text.
 
 The size rule is "small by default, speed wins on hot paths", so the budget
 went to the SIMD variants: the AVX-512 BLAKE3 kernel alone is 21 KB, and
@@ -589,23 +777,26 @@ The "well below 100 KB" target is not met: the vendored hot code alone is
 
 ## 11. Threat model
 
-**Assumed:** the attacker has every backup file and index, can modify,
+**Assumed:** the attacker has every chain and index file, can modify,
 delete, reorder, truncate and replay them, and does not have both the key
 file and one of its passphrases (having one without the other: see the key
-file paragraph below).
+file paragraph below). For an unencrypted chain (§3) none of this section's
+protection applies beyond the detection of accidental damage.
 
 **What they learn:**
 
-- that these are bu files, the format version and kind;
-- per backup: the number of new chunks and the length of each chunk record
-  (≈ compressed chunk size), the size of the manifest and the trailer
-  (≈ number of files and chunks), the total size;
-- across backups: how much changed between increments (from their sizes).
+- that these are bu files, the format version, kind and mode;
+- per segment: its generation (in the trailer), the number of new chunks
+  and the length of each chunk record (≈ compressed chunk size), the size of
+  the manifest and the table (≈ number of files and chunks), the total size;
+- across segments: how much changed between increments (from their sizes).
 
 **What they do not learn:** file names, directory structure, file sizes,
 timestamps, owners, modes, symlink targets, which chunks are shared between
-backups (IDs are inside the encrypted trailer, and every file has its own
-key), or anything about content beyond the above.
+segments (IDs are inside the encrypted table, and every segment has its own
+key), where in the stream the stored chunks sit (their sequence numbers are
+inside the sealed record headers), or anything about content beyond the
+above.
 
 **Known leaks inherent to the design** (Borg shares both): the sequence of
 chunk lengths of a large file, which CDC derives from its content, can be
@@ -616,18 +807,26 @@ records would blunt both at a cost in size; bu does not pad.
 **What they can do:**
 
 - *forge or alter data:* no; every record is authenticated, every chunk is
-  re-hashed, and any change makes `check` and `restore` fail loudly
-  (integration test 03 flips bytes in chunks, header, trailer and footer and
+  re-hashed, every trailer authenticates its segment's layout, and any
+  change makes `check` and `restore` fail loudly (integration test 03 flips
+  bytes in chunks, record headers, the header and the trailer, and
   truncates);
-- *delete or withhold files:* yes, which `restore` reports as an incomplete
-  chain (missing parent snapshot or missing chunks) rather than as damage;
-- *roll back:* present an older but valid chain instead of the current one.
-  bu cannot detect that without external state; keep the index (which
-  records the latest generation and snapshot ID) or a list of expected files
-  somewhere the attacker cannot write;
-- *substitute files between two chains made with the same key:* each file is
-  internally consistent, so this is detected only where snapshot IDs or
-  chunks do not line up. Use one key per data set if that matters.
+- *delete or withhold segments:* yes, which `restore` reports as an
+  incomplete chain (missing parent snapshot or missing chunks) rather than
+  as damage;
+- *roll back:* present an older but valid chain instead of the current one,
+  or cut a chain file back to a segment boundary. bu cannot detect that
+  without external state; keep an index (which records the latest
+  generation and snapshot ID) or a list of expected sizes somewhere the
+  attacker cannot write. Cutting inside a segment is visible: readers
+  report the incomplete tail and `check` fails;
+- *substitute segments between two chains made with the same key:* each
+  segment is internally consistent, so this is detected only where
+  snapshot IDs or chunks do not line up. Use one key per data set if that
+  matters;
+- *replace an encrypted chain with an unencrypted one of their own:* only
+  against readers run without `--key`. With `--key`, bu refuses an
+  unencrypted chain by name.
 
 **The key file** holds `K` only wrapped under passphrases (§3). Someone who
 steals it still needs a passphrase, and can only guess offline at the cost of
@@ -647,13 +846,21 @@ backup help, since `K` itself is what they can recover.
   device files, FIFOs and sockets (skipped with a warning), file flags.
 - Exclude patterns and a one-file-system switch; back up what you name (the
   walk descends into mounted filesystems).
-- More than one snapshot per file, and pruning other than by merging.
+- More than one snapshot per segment, and pruning other than by merging.
+- Merging from a pipe: what to keep is known only at the end of the chain.
+  Save the stream to a file first.
+- Loading the tables of a chain's segments in parallel. On a network mount
+  each large segment costs a round trip at open; merging a long chain
+  keeps that small.
+- Locks that hold across machines on FUSE and SMB mounts (§1): bu cannot
+  make a filesystem lock what it does not; one chain per writing machine.
 - A ChaCha20-Poly1305 fallback for CPUs without AES-NI (§3).
 - Fixed-size chunking for caller-chosen files (`--fixed`): SQLite gets page
   chunking automatically and nothing else measured needed it.
 - Live-database consistency (§2).
 - A parallel walk: stat is cheap next to reading; the readers already overlap
   opens.
-- Unbounded backup files: the trailer is capped at 3 GiB (~22 bytes per new
+- Unbounded segments: the chunk table is capped at 3 GiB (~22 bytes per new
   chunk), i.e. ~140 million new chunks or ~2.8 TB of unique data in one
-  backup file. Larger first backups can be split by directory.
+  segment. Larger first backups can be split by directory, into chains of
+  their own.

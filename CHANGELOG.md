@@ -7,6 +7,70 @@ own version number (docs/format.md); a release that changes it says so.
 
 ## [Unreleased]
 
+### Changed
+- **Chain files; format version 2.** A full backup and its increments live
+  in one file, the chain, as self-contained segments laid end to end, each
+  ending in a 64-byte authenticated trailer (segment length, where its
+  manifest and chunk table are, generation, check value, magic). Offsets
+  are relative to each segment, so `cat a.bu b.bu` of segments written
+  separately is a valid chain. Format 1 files are refused by version.
+- **Path-first CLI.** `bu create (--key KEY | --no-key) CHAIN PATH...`
+  writes a full backup into a new chain and appends an increment to an
+  existing one, reading the base (dedupe set, delta base, files cache)
+  from the chain's tail; no index file is needed. `restore`, `check`,
+  `list`, `index` take `CHAIN...` (a chain file, or its segments as
+  separate files, in order); `restore` takes the paths to restore after
+  `--` (replacing `--path`); `merge` writes to `-o OUT` (or stdout), and
+  `-o` naming the input compacts a chain in place.
+- `-` is stdin or stdout. A regular file there is used like a path
+  (`bu create ... - src >> chain.bu` appends); a pipe is streamed. `create`
+  to a pipe takes its base from `--base INDEX` and writes the next with
+  `--index-out INDEX`; the index is otherwise optional. `check` and `list`
+  read a chain from a pipe in one pass; `restore` does too, with
+  `--index`, writing each chunk as it streams past. Pipes get a 1 MiB
+  buffer (`F_SETPIPE_SZ`).
+- `create` on a chain file takes an exclusive lock (failing at once when
+  another bu holds it), appends with `O_APPEND`, fsyncs, and truncates the
+  file back on any failure, including SIGINT, SIGTERM and SIGHUP. After a
+  SIGKILL or a crash, readers skip the partial last segment (and say so;
+  `check` fails), and the next `create` removes it.
+- Every record starts with a sealed record header (its type and body
+  nonce, under a nonce counted from the record's position), so a reader
+  streaming the chain can open the chunks before the table arrives without
+  the sequence numbers' gaps being visible. A body's associated data is
+  its type; the content hash binds the chunk ID.
+- Manifests carry each chunk's size, and `create` writes a self-contained
+  manifest instead of a delta when the deltas since the last one would
+  outweigh it, so resolving the latest snapshot reads at most about twice
+  a full manifest however long the chain.
+- Restore sorts each batch's chunks by their place in the chain and reads
+  them in spans that may skip up to 64 KiB of unneeded records; a chunk
+  used several times in a span is decoded once. Merge reads in spans too
+  (it read one record per pread).
+- The index file holds the latest snapshot and two checkpoint counters;
+  the advisory chunk-location table is gone. `bu index` writes one from a
+  chain (from a pipe too).
+
+### Added
+- `--no-key`: unencrypted chains. Chunk IDs are unkeyed BLAKE3, payloads
+  are stored in the clear, and every tag is a BLAKE3 checksum (a chunk's
+  is its ID): damage is detected, tampering is not. Readers learn the mode
+  from the header; `--key` on an unencrypted chain, `--no-key` on an
+  encrypted one, and chains mixing both are refused. `create` requires one
+  of `--key` and `--no-key`.
+- Integration tests 14 (cat-joined segments, stdin seek mode, stream
+  check/list/restore, partial restore, create to stdout), 15 (write
+  error, SIGTERM and SIGKILL mid-append, an interrupted first backup),
+  16 (`--no-key`) and 17 (lock contention).
+
+### Fixed
+- Error messages that wrapped another message with a file name
+  (`errSet(err, path, ": ", err.view())`) could garble it: the parts were
+  appended into the string they were read from.
+- `bu check` started its threads before asking for the passphrase, so a
+  Ctrl-Z at the prompt reached a thread that did not hold it back.
+
+
 ### Security
 - The key file and the index are replaced through a temp file with a random
   name, created with `O_EXCL | O_NOFOLLOW` and mode 0600, and the directory
@@ -42,7 +106,8 @@ own version number (docs/format.md); a release that changes it says so.
   passphrase does not revoke it for someone holding an older copy of the
   key file (only a new key does); the worker threads share one key schedule
   per container (not one per thread).
-- Binary size 231 232 → 234 344 bytes.
+- Binary size 231 232 → 234 344 bytes; chain files took it from 238 808
+  to 273 272 bytes.
 
 ### Fixed
 - `bu create` could hang forever at the end of the file list: readers

@@ -11,9 +11,9 @@ echo b > "src/${esc}]0;owned${esc}\\title"
 echo c > 'src/back\slash'
 echo d > "src/tab"$'\t'"ü"
 ln -s "target${esc}[2J" "src/link"
-"$BU" create --key key --passphrase-file pass --index-out idx src > full.bk
-"$BU" list --key key --passphrase-file pass full.bk > listing
-"$BU" list --key key --passphrase-file pass idx >> listing
+"$BU" create "${K[@]}" --index-out idx c.bu src
+"$BU" list "${K[@]}" c.bu > listing
+"$BU" list "${K[@]}" idx >> listing
 LC_ALL=C grep -q "$esc" listing && fail "an escape byte reached the listing"
 [ "$(grep -c 'fake 0 0 0 entry' listing)" = 2 ] || fail "the newline name was not kept on one line"
 grep -qF 'src/nl\nfake 0 0 0 entry' listing || fail "newline not shown as \\n: $(cat listing)"

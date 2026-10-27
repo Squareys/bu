@@ -1,10 +1,10 @@
 // main.cpp — `bu`: subcommand dispatch and the help text.
 //
-// bu is a Unix filter: `create` and `merge` write a backup to stdout and
-// never open a network connection — where the bytes go (a file, `aws s3 cp -`,
-// ssh, a tape) is the caller's pipe. Everything else reads backup files from
-// disk, where it may seek. Exit status: 0 ok, 1 runtime failure (or warnings
-// during create — see the help text), 2 usage error.
+// bu works on chain files through file descriptors and never opens a network
+// connection: a chain lives on a local disk, a network mount (NFS, SMB,
+// sshfs, rclone) or goes through a pipe (ssh, `aws s3 cp -`), and bu does
+// not care which. Exit status: 0 ok, 1 runtime failure (or warnings during
+// create — see the help text), 2 usage error.
 
 #include "cmd/args.hpp"
 #include "cmd/commands.hpp"
@@ -17,7 +17,7 @@ using namespace bk;
 namespace {
 
 const char kHelp[] =
-"bu " BU_VERSION " — backup utility: encrypted, deduplicating, incremental backups as a Unix filter\n"
+"bu " BU_VERSION " — backup utility: encrypted, deduplicating, incremental backups in one chain file\n"
 "\n"
 "  bu key init KEYFILE\n"
 "      Make a new key file: a random master key, stored only wrapped under a\n"
@@ -32,50 +32,53 @@ const char kHelp[] =
 "      (1-100) or --kdf-target-ms MS (100-60000, default 2000: the passes are\n"
 "      calibrated so one unlock takes about that long here).\n"
 "\n"
-"  bu create --key KEYFILE --index-out INDEX [--base INDEX] [-j N]\n"
-"               [--no-files-cache] [-v] PATH... > BACKUP\n"
-"      Stream a backup of PATH... to stdout. With --base, an increment: only\n"
-"      chunks the base index does not list are stored, and files whose\n"
-"      metadata is unchanged are not even read (--no-files-cache: read them).\n"
-"      Writes the new INDEX (atomically, after the backup was fully written);\n"
-"      --index-out may name the same file as --base.\n"
+"  bu create (--key KEYFILE | --no-key) [--base INDEX] [--index-out INDEX]\n"
+"            [-j N] [--no-files-cache] [-v] CHAIN PATH...\n"
+"      Back up PATH... into CHAIN. A new or empty file gets a full backup; a\n"
+"      chain gets an increment appended (its latest snapshot is the base:\n"
+"      only new chunks are stored, and files whose metadata is unchanged are\n"
+"      not even read; --no-files-cache: read them). CHAIN - writes to stdout;\n"
+"      to a pipe, with the base from --base INDEX. --index-out writes the new\n"
+"      snapshot's index (for the next --base). --no-key: unencrypted, with\n"
+"      checksums against damage but no protection against tampering.\n"
 "\n"
-"  bu restore --key KEYFILE [-C DIR] [--path PREFIX] [-j N] [-v] BACKUP...\n"
-"      Restore the latest snapshot of the chain BACKUP... (the full backup or\n"
-"      merged file and every increment since, in any order) into DIR\n"
-"      (default: current directory), every chunk authenticated and verified.\n"
+"  bu restore [--key KEYFILE] [--index INDEX] [-C DIR] [-j N] [-v] CHAIN... [-- PATH...]\n"
+"      Restore the latest snapshot into DIR (default: the current directory),\n"
+"      or only the PATHs given after --. Every chunk is authenticated and\n"
+"      verified. A chain read from a pipe (CHAIN -) needs --index.\n"
 "\n"
-"  bu merge --key KEYFILE [-j N] [-v] BACKUP... > MERGED\n"
-"      One self-contained backup of the chain's latest snapshot holding only\n"
-"      the chunks it references. merge(full, inc1) replaces both; later\n"
-"      increments keep working with it.\n"
+"  bu merge [--key KEYFILE] [-o OUT] [-j N] [-v] CHAIN...\n"
+"      One full segment with the chain's latest snapshot and only the chunks\n"
+"      it references, to OUT (default: stdout). -o naming the input compacts\n"
+"      it in place; increments appended later keep working.\n"
 "\n"
-"  bu check --key KEYFILE [-j N] [-v] BACKUP...\n"
+"  bu check [--key KEYFILE] [-j N] [-v] CHAIN...\n"
 "      Authenticate every record and verify every snapshot is complete.\n"
 "\n"
-"  bu index --key KEYFILE -o INDEX BACKUP...\n"
-"      Rebuild a lost index (files cache included) from the chain.\n"
+"  bu list [--key KEYFILE] CHAIN... | INDEX\n"
+"      Show the segments, and the latest snapshot's tree.\n"
 "\n"
-"  bu list --key KEYFILE BACKUP... | INDEX\n"
-"      Show the files, and the latest snapshot's tree.\n"
+"  bu index [--key KEYFILE] -o INDEX CHAIN...\n"
+"      Write the index of the latest snapshot (for create --base, restore\n"
+"      --index).\n"
 "\n"
-"Every command that unlocks a key file (--key, and key add/passwd/remove)\n"
-"asks for the passphrase on the terminal, or reads it from\n"
-"--passphrase-file PATH (its first line) or --passphrase-fd N, for\n"
-"unattended runs; key add and passwd read the new one from\n"
-"--new-passphrase-file PATH or --new-passphrase-fd N (key init: from\n"
-"--passphrase-file or --passphrase-fd).\n"
+"CHAIN... is a chain file, or the segments of one as separate files, in\n"
+"order; - is stdin (or stdout for create). A regular file is read by\n"
+"seeking, a pipe as a stream. Reading commands learn from the chain whether\n"
+"it is encrypted: --key is required for an encrypted chain and refused for\n"
+"an unencrypted one (--no-key may be given to say so). Every command that\n"
+"unlocks a key file asks for the passphrase on the terminal, or reads it\n"
+"from --passphrase-file PATH (its first line) or --passphrase-fd N; key add\n"
+"and passwd read the new one from --new-passphrase-file PATH or\n"
+"--new-passphrase-fd N (key init: from --passphrase-file or --passphrase-fd).\n"
 "\n"
 "-j N sets the worker threads (default: online CPUs; restore: at most 8;\n"
-"create: the CPUs less three quarters of its readers). create adds up to\n"
-"eight reader threads, a chunker and a writer. Exit status: 0 ok; 1 failure,\n"
-"or create finished with warnings (unreadable files were left out; the\n"
-"backup and index are still valid); 2 usage error.\n"
+"create: the CPUs less three quarters of its readers). Exit status: 0 ok;\n"
+"1 failure, or create finished with warnings (unreadable files were left\n"
+"out; the backup is still valid); 2 usage error.\n"
 "\n"
-"Example (to S3, keeping the index only when the upload succeeded):\n"
-"  set -o pipefail\n"
-"  bu create --key k --passphrase-file ~/.bu-pass --base idx --index-out idx.new ~/data \\\n"
-"      | aws s3 cp - s3://bucket/data-$(date +%F).bk && mv idx.new idx\n";
+"Example (daily, from cron):\n"
+"  bu create --key k --passphrase-file ~/.bu-pass /mnt/backup/data.bu ~/data\n";
 
 } // namespace
 

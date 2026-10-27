@@ -17,8 +17,11 @@ namespace bk {
 // Declared in core/string.hpp; lives here, in a cold (-Oz) TU, because
 // nothing on a hot path builds error messages.
 bool errSetParts(String& e, const StringView* parts, u32 n) {
-    e.clear();
-    for (u32 i = 0; i < n; ++i) e.append(parts[i]);
+    // Built aside: a part may be a view of `e` itself (a message wrapped
+    // with the file name: `errSet(err, path, ": ", err.view())`).
+    String out;
+    for (u32 i = 0; i < n; ++i) out.append(parts[i]);
+    e = move(out);
     return false;
 }
 
@@ -82,6 +85,7 @@ void OutStream::write(const void* p, usize n) {
     written += n;
     if (failed) return;
     const u8* s = static_cast<const u8*>(p);
+    if (toMemory) { buf.appendRange(s, u32(n)); return; }
     // A write at least a block long bypasses the buffer: copying a 4 MB
     // record into the buffer only to write it out again is a wasted memcpy.
     if (buf.count + n > kOutBlock) {
@@ -99,6 +103,7 @@ static_assert(sizeof(IoSlice) == sizeof(struct iovec), "IoSlice mirrors iovec");
 void OutStream::writeVec(const IoSlice* v, u32 n) {
     usize total = 0;
     for (u32 i = 0; i < n; ++i) total += v[i].len;
+    if (toMemory) { for (u32 i = 0; i < n; ++i) write(v[i].ptr, v[i].len); return; }
     written += total;
     if (failed || total == 0) return;
     if (!flush()) return;
@@ -129,6 +134,7 @@ void OutStream::writeVec(const IoSlice* v, u32 n) {
 
 bool OutStream::flush() {
     if (failed) return false;
+    if (toMemory) return true;
     if (buf.count && !writeAll(fd, buf.ptr, buf.count)) { failed = true; savedErrno = errno; return false; }
     buf.count = 0;
     return true;
@@ -149,7 +155,7 @@ bool readWholeFile(const char* path, u64 maxBytes, Array<u8>& out, String& err) 
     return true;
 }
 
-bool writeFileAtomic(const char* path, const void* data, usize n, String& err) {
+int tempFileBeside(const char* path, String& tmp, String& err) {
     // The temp name is the target's plus 16 random hex digits, created with
     // O_EXCL | O_NOFOLLOW: anyone who can write in the directory could plant
     // a symlink or a file of their own at a predictable name (the pid), and
@@ -158,28 +164,27 @@ bool writeFileAtomic(const char* path, const void* data, usize n, String& err) {
     // existing name is never opened, only skipped. O_TMPFILE + linkat was
     // the alternative; it still needs a named temp to rename over the
     // target (linkat will not replace), so it only adds a second code path.
-    String tmp;
-    int fd = -1;
-    for (u32 attempt = 0; attempt < 8 && fd < 0; ++attempt) {
+    for (u32 attempt = 0; attempt < 8; ++attempt) {
         u8 rnd[8];
-        if (getrandom(rnd, sizeof rnd, 0) != ssize_t(sizeof rnd)) return errSet(err, "getrandom: ", strerror(errno));
+        if (getrandom(rnd, sizeof rnd, 0) != ssize_t(sizeof rnd)) { errSet(err, "getrandom: ", strerror(errno)); return -1; }
         static const char kDigits[] = "0123456789abcdef";
         char hex[16];
         for (u32 i = 0; i < 8; ++i) { hex[2 * i] = kDigits[rnd[i] >> 4]; hex[2 * i + 1] = kDigits[rnd[i] & 15]; }
         tmp.assign(StringView(path));
         tmp.append(".tmp."_s);
         tmp.append(StringView(hex, 16));
-        fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (fd < 0 && errno != EEXIST) return errSet(err, tmp.c_str(), ": ", strerror(errno));
+        const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd >= 0) return fd;
+        if (errno != EEXIST) { errSet(err, tmp.c_str(), ": ", strerror(errno)); return -1; }
     }
-    if (fd < 0) return errSet(err, path, ": cannot create a temporary file beside it");
-    bool ok = writeAll(fd, data, n) && fsync(fd) == 0;
-    const int e = errno;
-    if (::close(fd) != 0) ok = false;
-    if (!ok) { ::unlink(tmp.c_str()); return errSet(err, tmp.c_str(), ": ", strerror(e)); }
-    if (::rename(tmp.c_str(), path) != 0) {
+    errSet(err, path, ": cannot create a temporary file beside it");
+    return -1;
+}
+
+bool renameDurably(const char* tmp, const char* path, String& err) {
+    if (::rename(tmp, path) != 0) {
         const int re = errno;
-        ::unlink(tmp.c_str());
+        ::unlink(tmp);
         return errSet(err, path, ": ", strerror(re));
     }
     // The rename is durable only once the directory is: without this fsync a
@@ -194,6 +199,22 @@ bool writeFileAtomic(const char* path, const void* data, usize n, String& err) {
     ::close(dfd);
     if (!synced) return errSet(err, dir.c_str(), ": ", strerror(de));
     return true;
+}
+
+bool writeFileAtomic(const char* path, const void* data, usize n, String& err) {
+    String tmp;
+    const int fd = tempFileBeside(path, tmp, err);
+    if (fd < 0) return false;
+    bool ok = writeAll(fd, data, n) && fsync(fd) == 0;
+    const int e = errno;
+    if (::close(fd) != 0) ok = false;
+    if (!ok) { ::unlink(tmp.c_str()); return errSet(err, tmp.c_str(), ": ", strerror(e)); }
+    return renameDurably(tmp.c_str(), path, err);
+}
+
+void pipeGrow(int fd) {
+    struct stat st;
+    if (fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode)) (void)fcntl(fd, F_SETPIPE_SZ, 1 << 20);
 }
 
 i64 nowNs() {

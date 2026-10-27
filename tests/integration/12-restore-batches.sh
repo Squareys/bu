@@ -20,24 +20,24 @@ for i in 1 2 3 4 5; do cp src/dup/one.bin "src/dup/one-$i.bin"; done
 { prand head 100000; head -c 600000 /dev/zero; prand tail 100000; } > src/big/holes.bin
 truncate -s 2000000 src/big/sparse.bin
 
-"$BU" create --key key --passphrase-file pass --index-out idx src > full.bk
-"$BU" check --key key --passphrase-file pass -v full.bk 2>check.log
+"$BU" create "${K[@]}" c.bu src
+"$BU" check "${K[@]}" -v c.bu 2>check.log
 grep -q "check ok" check.log || fail "check did not pass: $(cat check.log)"
 
 for j in 1 3 8; do
     rm -rf "out-$j"
     # 300 descriptors: batches of ~20 files, about 50 of them.
-    (ulimit -n 300 && "$BU" restore --key key --passphrase-file pass -C "out-$j" -j "$j" full.bk)
+    (ulimit -n 300 && "$BU" restore "${K[@]}" -C "out-$j" -j "$j" c.bu)
     assert_same_tree src "out-$j/src"
 done
 USED=$(du -k out-3/src/big/sparse.bin | cut -f1)
 [ "$USED" -lt 64 ] || fail "all-zero file restored with ${USED} KiB allocated, expected a hole"
-rm -rf out-dflt && "$BU" restore --key key --passphrase-file pass -C out-dflt full.bk
+rm -rf out-dflt && "$BU" restore "${K[@]}" -C out-dflt c.bu
 assert_same_tree src out-dflt/src
 
 # A record damaged in the middle of a span fails check and restore loudly.
-OFF=$(( $(size_of full.bk) / 3 ))
-printf '\xff' | dd of=full.bk bs=1 seek="$OFF" conv=notrunc status=none
-expect_fail "authentication failed\|record length" "$BU" check --key key --passphrase-file pass full.bk
-expect_fail "authentication failed\|record length" "$BU" restore --key key --passphrase-file pass -C out-bad full.bk
+OFF=$(( $(size_of c.bu) / 3 ))
+printf '\xff' | dd of=c.bu bs=1 seek="$OFF" conv=notrunc status=none
+expect_fail "authentication failed\|record length" "$BU" check "${K[@]}" c.bu
+expect_fail "authentication failed\|record length" "$BU" restore "${K[@]}" -C out-bad c.bu
 note ok
