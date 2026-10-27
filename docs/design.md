@@ -708,7 +708,7 @@ these are CPU numbers; on disk the readers' queue depth matters instead).
 | throughput | 1.2 GB/s | 1.4 GB/s | 2.6 GB/s | 4.2 GB/s | 3.7 GB/s |
 
 Beyond ~8 workers the writer's copy into the output file and the E-cores
-flatten the curve. (Median of three runs at commit 47cc455. `-j 20` runs 8
+flatten the curve. (Median of three runs on a development build of 27 October 2026. `-j 20` runs 8
 readers on top of 20 workers; without `-j`, create runs 14 workers on this
 machine for that reason.)
 

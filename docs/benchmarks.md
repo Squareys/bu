@@ -80,9 +80,11 @@ index of the previous backup:
 The script also prints every tree row as a multiple of the time it takes to
 read every file once with 8 streams, the fastest plain reader.
 
-**Before and after.** "Before" is bu at 1da8070, "after" at 47cc455, both
-run by the same script (with the key-setup fix in this commit). Each case
-runs 5 times; the tables show the median. Two complete passes ran on an
+**Before and after.** "Before" is bu without the changes under
+[The four gaps, measured](#the-four-gaps-measured) (one record per
+`pread`, 4 readers), "after" is bu with them. Both are development builds
+of 27 October 2026, from before the chain file format, run by the same
+script. Each case runs 5 times; the tables show the median. Two complete passes ran on an
 idle machine: pass 2 with both binaries, pass 3 with the final binary only
 (it changed create's default thread counts after pass 2). The tables leave
 out a first pass that overlapped another job's builds. Where a row's code is the
@@ -94,7 +96,8 @@ when they differ by less than 1.5×, ² when one pass caught a disk stall
 ## Hardware
 
 Intel i7-12700H (6P + 8E cores, 20 threads, no AVX-512), 32 GiB RAM, on AC,
-`powersave` governor with the `balanced` platform profile. One 1 TB NVMe SSD. The root file system is ext4 (`noatime`, no
+`powersave` governor with the `balanced` platform profile. One 1 TB NVMe
+SSD. The root file system is ext4 (`noatime`, no
 `discard`) on LUKS/dm-crypt, 95% full (6 GB free). Linux 7.2.9 (CachyOS),
 `vm.dirty_bytes` 256 MiB and `vm.dirty_background_bytes` 64 MiB (the
 distribution's settings: buffered writers are throttled early). tmpfs is the
