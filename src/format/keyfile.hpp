@@ -59,6 +59,12 @@ constexpr u32 kKdfMaxPasses = 100;
 constexpr u32 kKdfDefaultTargetMs = 2000;
 constexpr u32 kKdfDefaultMaxMemMiB = 1024;
 constexpr u32 kKdfAutoMinMemMiB = 64;
+// Below these a slot is reported as weak (kdfParamsWeak): RFC 9106's second
+// recommended option is 64 MiB and three passes. Its first option, 2 GiB and
+// one pass, is not weak, so fewer passes are fine at 2 GiB and up.
+constexpr u32 kKdfWeakMemMiB = 64;
+constexpr u32 kKdfWeakPasses = 3;
+constexpr u32 kKdfWeakOnePassMemMiB = 2048;
 
 constexpr u32 kPassphraseMax = 1024;
 
@@ -91,9 +97,13 @@ const u8* keyFileId(const KeyFile& f);
 [[nodiscard]] bool keyFileCreate(const Key& master, StringView pass, const KdfParams& kdf, KeyFile& out,
                                  String& err);
 // Try every intact active slot with `pass`. On success `master` holds K and
-// `slot` the index that opened. Errors say "wrong passphrase" only when every
-// slot that could be tried was tried and none opened.
-[[nodiscard]] bool keyFileUnlock(const KeyFile& f, StringView pass, Key& master, u32& slot, String& err);
+// `slot` the index that opened. A slot whose Argon2id run fails (its memory
+// cannot be allocated on this host) is skipped, not fatal: another slot,
+// perhaps made for this host, may still open. `kdfFailed` gets a bit per
+// such slot, for the caller to warn about. Errors say "wrong passphrase" only
+// when every slot that could be tried was tried and none opened.
+[[nodiscard]] bool keyFileUnlock(const KeyFile& f, StringView pass, Key& master, u32& slot, u32& kdfFailed,
+                                 String& err);
 // (Re)write `slot` with `master` under `pass`: fresh salt and nonce.
 [[nodiscard]] bool keyFileSetSlot(KeyFile& f, u32 slot, const Key& master, StringView pass, const KdfParams& kdf,
                                   String& err);
@@ -109,6 +119,10 @@ void keyFileClearSlot(KeyFile& f, u32 slot);
 [[nodiscard]] bool kdfCalibrate(u32 targetMs, u32 memMiB, KdfParams& out, String& err);
 // The automatic memory cost on this machine, in MiB.
 u32 kdfAutoMemMiB();
+// True for parameters below RFC 9106's recommendations (kKdfWeak*). Only a
+// warning: the parameters are the user's choice, and the AEAD stops anyone
+// else from lowering them.
+bool kdfParamsWeak(const KdfParams& k);
 
 // Read and parse; `path` prefixes every error.
 [[nodiscard]] bool keyFileRead(const char* path, KeyFile& out, String& err);
@@ -117,6 +131,17 @@ u32 kdfAutoMemMiB();
 [[nodiscard]] bool keyFileWriteNew(const char* path, const KeyFile& f, String& err);
 // Replace an existing key file atomically (temp file, fsync, rename): a
 // crash leaves the old file or the new one, never a torn mix of slots.
+// Refuses a path that is a symlink or has other hard links (see
+// keyFileCheckReplaceable).
 [[nodiscard]] bool keyFileReplace(const char* path, const KeyFile& f, String& err);
+// Whether keyFileReplace can replace `path` in place. A rename replaces the
+// name, not the file behind it: through a symlink the link would become a
+// regular file while the file it pointed to kept the old slots, and with a
+// second hard link the other name would keep them — so a removed passphrase
+// would go on opening the key. Refusing (and naming the real file) was
+// chosen over resolving the link and replacing its target: the target's
+// directory may not be the user's to write, and a rewrite that silently
+// lands somewhere else is the surprise this check exists to prevent.
+[[nodiscard]] bool keyFileCheckReplaceable(const char* path, String& err);
 
 } // namespace bk

@@ -56,10 +56,13 @@ struct OutStream {
 
 // Whole small file into `out` (key files, index files); bounded by maxBytes.
 [[nodiscard]] bool readWholeFile(const char* path, u64 maxBytes, Array<u8>& out, String& err);
-// Write `data` to `path` atomically: a temp file beside it, fsync, rename.
-// A crash leaves either the old file or the new one, never half of either —
-// this is how the index is replaced, and a torn index would silently make the
-// next increment store everything again (or worse, think it needn't).
+// Write `data` to `path` atomically: a new temp file beside it (random name,
+// O_EXCL, mode 0600), fsync, rename, fsync of the directory. A crash leaves
+// either the old file or the new one, never half of either — this is how the
+// index and the key file are replaced, and a torn index would silently make
+// the next increment store everything again (or worse, think it needn't).
+// `path` itself is replaced, not followed: a symlink there is replaced by the
+// new file (keyFileReplace refuses that case before calling this).
 [[nodiscard]] bool writeFileAtomic(const char* path, const void* data, usize n, String& err);
 
 // Wall clock in nanoseconds since the epoch.

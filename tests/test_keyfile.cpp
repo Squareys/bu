@@ -6,12 +6,23 @@
 // KDF parameters edited, even by someone who fixes up the checksum (the AEAD's
 // associated data covers them); all eight slots work and a ninth does not
 // exist; the last usable slot cannot be removed; and the old bu-key-1
-// plaintext format is refused by name. KDF costs are the minimum bu accepts
+// plaintext format is refused by name; a slot whose Argon2id memory cannot be
+// allocated is skipped, not fatal; weak parameters are recognised; and
+// keyFileReplace refuses a symlinked or hard-linked key path and never
+// writes through a planted temp file. KDF costs are the minimum bu accepts
 // (8 MiB, one pass) so the file runs in well under a second.
 
 #include "core/bytes.hpp"
 #include "format/keyfile.hpp"
+#include "io/io.hpp"
 #include "test.hpp"
+
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 using namespace bk;
 
@@ -38,14 +49,16 @@ bool opens(const KeyFile& f, StringView pass, const Key& want, u32 wantSlot) {
     Key k;
     u32 slot = 99;
     String err;
-    return keyFileUnlock(f, pass, k, slot, err) && memEqual(k.b, want.b, kKeyBytes) && slot == wantSlot;
+    u32 kdfFailed = 0;
+    return keyFileUnlock(f, pass, k, slot, kdfFailed, err) && kdfFailed == 0 && memEqual(k.b, want.b, kKeyBytes) && slot == wantSlot;
 }
 
 bool failsWith(const KeyFile& f, StringView pass, StringView msg) {
     Key k;
     u32 slot = 0;
     String err;
-    return !keyFileUnlock(f, pass, k, slot, err) && err.view().startsWith(msg);
+    u32 kdfFailed = 0;
+    return !keyFileUnlock(f, pass, k, slot, kdfFailed, err) && err.view().startsWith(msg);
 }
 
 } // namespace
@@ -202,4 +215,150 @@ BK_TEST(keyfile_eight_slots_and_last_slot_removal_refused) {
     err.clear();
     BK_CHECK(!keyFileRemoveSlot(f, kKeySlots - 1, err));
     BK_CHECK(keyFileRemoveSlot(f, 0, err));     // the damaged one may go
+}
+
+// The sanitizers reserve terabytes of address space up front, so an address
+// space limit cannot be set under them; the release build runs this test.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define BK_TEST_NO_RLIMIT_AS 1
+#endif
+#endif
+
+BK_TEST(keyfile_slot_without_memory_is_skipped_not_fatal) {
+#ifdef BK_TEST_NO_RLIMIT_AS
+    printf("    (skipped: address space limits do not work under sanitizers)\n");
+#else
+    // Slot 0 asks for 4 GiB, more than this process may map; slot 1 is
+    // cheap. Before the fix the allocation failure in slot 0 ended the
+    // unlock, so a host too small for one slot could use none.
+    const Key master = keyOf(6);
+    KeyFile f;
+    String err;
+    BK_REQUIRE(keyFileCreate(master, "big"_s, kCheap, f, err));
+    BK_REQUIRE(keyFileSetSlot(f, 1, master, "small"_s, kCheap, err));
+    storeU32LE(slotAt(f, 0) + 8, 4096u << 10);
+    fixChecksum(f, 0);
+    struct rlimit old, lim;
+    BK_REQUIRE(getrlimit(RLIMIT_AS, &old) == 0);
+    lim = old;
+    lim.rlim_cur = rlim_t(3) << 30;
+    BK_REQUIRE(setrlimit(RLIMIT_AS, &lim) == 0);
+    Key k;
+    u32 slot = 99, kdfFailed = 0;
+    const bool ok = keyFileUnlock(f, "small"_s, k, slot, kdfFailed, err);
+    const bool same = memEqual(k.b, master.b, kKeyBytes);
+    String err2;
+    u32 slot2 = 0, failed2 = 0;
+    const bool ok2 = keyFileUnlock(f, "nope"_s, k, slot2, failed2, err2);
+    // Only slot 0 present and out of reach: says so, not "wrong passphrase".
+    KeyFile only = f;
+    keyFileClearSlot(only, 1);
+    String err3;
+    u32 failed3 = 0;
+    const bool ok3 = keyFileUnlock(only, "small"_s, k, slot2, failed3, err3);
+    setrlimit(RLIMIT_AS, &old);
+    BK_CHECK(ok && slot == 1 && kdfFailed == 1u && same);
+    BK_CHECK(!ok2 && failed2 == 1u && err2.view().startsWith("wrong passphrase, or one of the slots"_s));
+    BK_CHECK(!ok3 && failed3 == 1u && err3.view().startsWith("no key slot could be tried: Argon2id"_s));
+#endif
+}
+
+BK_TEST(keyfile_weak_kdf_parameters) {
+    BK_CHECK(kdfParamsWeak(kCheap));
+    BK_CHECK(kdfParamsWeak(KdfParams{10, 32u << 10}));      // too little memory, whatever the passes
+    BK_CHECK(kdfParamsWeak(KdfParams{2, 1024u << 10}));     // too few passes below 2 GiB
+    BK_CHECK(!kdfParamsWeak(KdfParams{3, 64u << 10}));      // RFC 9106 option 2
+    BK_CHECK(!kdfParamsWeak(KdfParams{1, 2048u << 10}));    // RFC 9106 option 1
+    BK_CHECK(!kdfParamsWeak(KdfParams{6, 1024u << 10}));    // a calibrated default
+}
+
+namespace {
+
+// A fresh directory under $TMPDIR (or /tmp) for the file tests.
+bool tempDir(char out[64]) {
+    const char* base = getenv("TMPDIR");
+    snprintf(out, 64, "%s/bu-kf.XXXXXX", base && *base && strlen(base) < 40 ? base : "/tmp");
+    return mkdtemp(out) != nullptr;
+}
+
+String join(const char* dir, const char* name) {
+    String s{StringView(dir)};
+    s.append("/"_s);
+    s.append(StringView(name));
+    return s;
+}
+
+bool contains(StringView hay, StringView needle) {
+    for (u32 i = 0; i + needle.count <= hay.count; ++i)
+        if (hay.sub(i, needle.count) == needle) return true;
+    return false;
+}
+
+bool fileHas(const char* path, StringView want) {
+    Array<u8> data;
+    String err;
+    return readWholeFile(path, 1 << 20, data, err) && StringView(reinterpret_cast<const char*>(data.ptr), data.count) == want;
+}
+
+} // namespace
+
+BK_TEST(write_file_atomic_never_writes_through_a_planted_name) {
+    // The old temp name was "<path>.tmp.<pid>", opened with O_TRUNC and no
+    // O_NOFOLLOW: a symlink planted there sent the write to its target.
+    char dir[64];
+    BK_REQUIRE(tempDir(dir));
+    const String victim = join(dir, "victim"), target = join(dir, "key");
+    String planted(target.view());
+    planted.append(".tmp."_s);
+    planted.appendU64(u64(getpid()));
+    {
+        const int fd = open(victim.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        BK_REQUIRE(fd >= 0 && write(fd, "precious", 8) == 8);
+        close(fd);
+    }
+    BK_REQUIRE(symlink(victim.c_str(), planted.c_str()) == 0);
+    String err;
+    BK_CHECK(writeFileAtomic(target.c_str(), "new", 3, err));
+    BK_CHECK(fileHas(victim.c_str(), "precious"_s));
+    BK_CHECK(fileHas(target.c_str(), "new"_s));
+    struct stat st;
+    BK_CHECK(lstat(target.c_str(), &st) == 0 && S_ISREG(st.st_mode) && (st.st_mode & 0777) == 0600);
+    // Replacing again leaves no temp files behind besides the planted link.
+    BK_CHECK(writeFileAtomic(target.c_str(), "newer", 5, err));
+    BK_CHECK(fileHas(target.c_str(), "newer"_s));
+    unlink(planted.c_str());
+    unlink(victim.c_str());
+    unlink(target.c_str());
+    BK_CHECK(rmdir(dir) == 0);      // fails if a temp file was left over
+}
+
+BK_TEST(keyfile_replace_refuses_symlinks_and_hard_links) {
+    // Through a symlink the rename replaced the link and left the real file,
+    // and so a removed passphrase, in place.
+    char dir[64];
+    BK_REQUIRE(tempDir(dir));
+    const String real = join(dir, "real.key"), link = join(dir, "link.key"), hard = join(dir, "hard.key");
+    KeyFile f;
+    String err;
+    BK_REQUIRE(keyFileCreate(keyOf(8), "pw"_s, kCheap, f, err));
+    BK_REQUIRE(keyFileWriteNew(real.c_str(), f, err));
+    BK_REQUIRE(symlink("real.key", link.c_str()) == 0);
+    KeyFile g = f;
+    keyFileClearSlot(g, 0);
+    err.clear();
+    BK_CHECK(!keyFileReplace(link.c_str(), g, err) && contains(err.view(), "symbolic link"_s));
+    struct stat st;
+    BK_CHECK(lstat(link.c_str(), &st) == 0 && S_ISLNK(st.st_mode));
+    BK_REQUIRE(::link(real.c_str(), hard.c_str()) == 0);
+    err.clear();
+    BK_CHECK(!keyFileReplace(real.c_str(), g, err) && contains(err.view(), "hard links"_s));
+    unlink(hard.c_str());
+    err.clear();
+    BK_CHECK(keyFileReplace(real.c_str(), g, err));
+    KeyFile back;
+    BK_CHECK(keyFileRead(real.c_str(), back, err) && memEqual(back.bytes, g.bytes, kKeyFileBytes));
+    unlink(link.c_str());
+    unlink(real.c_str());
+    BK_CHECK(rmdir(dir) == 0);
 }

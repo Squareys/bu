@@ -2,10 +2,13 @@
 # 09-key.sh — the key file's lifecycle, driven as unattended runs would
 # (--passphrase-file / --passphrase-fd, no terminal): init, add, passwd,
 # remove and info; a wrong passphrase reported as one and damage as damage;
+# key and passphrase files others can read warned about; a symlinked or
+# hard-linked key path refused by the commands that rewrite the file;
 # the last slot never removable; an existing file never overwritten; the old
 # bu-key-1 plaintext format refused by name; and backups that keep opening
 # through every passphrase change, because the master key never changes.
 source "$(dirname "$0")/lib.sh"
+umask 077    # passphrase files here are private unless a test says otherwise
 
 CHEAP=(--kdf-memory 8 --kdf-time 1)
 mkdir src && prand k 300000 > src/a.bin && echo hello > src/b.txt
@@ -16,7 +19,7 @@ mkdir src && prand k 300000 > src/a.bin && echo hello > src/b.txt
 [ "$(stat -c %a key)" = 600 ] || fail "key file mode $(stat -c %a key)"
 grep -q "integration test passphrase" key && fail "passphrase stored in the key file"
 "$BU" key info key > info || fail "key info"
-grep -q "^slot 0: passphrase, argon2id, 8 MiB, 1 pass$" info || fail "info slot 0: $(cat info)"
+grep -q "^slot 0: passphrase, argon2id, 8 MiB, 1 pass (weak)$" info || fail "info slot 0: $(cat info)"
 [ "$(grep -c ': empty$' info)" = 7 ] || fail "info: expected 7 empty slots"
 
 # Never overwritten, and refused before any passphrase is asked for.
@@ -38,6 +41,40 @@ if command -v setsid >/dev/null; then
     out=$(setsid -w "$BU" check --key key full.bk < pass 2>&1) && fail "unlocked without a passphrase source"
     echo "$out" | grep -q "no terminal to ask for the passphrase" || fail "no-tty error: $out"
 fi
+
+# Weak KDF parameters are warned about when a slot is written.
+out=$("$BU" key init --passphrase-file pass "${CHEAP[@]}" weak.key 2>&1) || fail "key init: $out"
+echo "$out" | grep -q "slot 0 is below 64 MiB / 3 passes" || fail "no weak-KDF warning: $out"
+
+# Files others can read are warned about: the key file (by every command
+# that reads it, key info included) and a passphrase file (its second factor
+# in plaintext). Modes 600 give no warning.
+out=$("$BU" check --key key --passphrase-file pass full.bk 2>&1) || fail "check: $out"
+echo "$out" | grep -q "warning" && fail "warning for private files: $out"
+cp pass pass-shared && chmod 644 pass-shared
+out=$("$BU" check --key key --passphrase-file pass-shared full.bk 2>&1) || fail "check: $out"
+echo "$out" | grep -q "warning: passphrase file pass-shared is accessible by other users" \
+    || fail "no passphrase-file warning: $out"
+cp key key-shared && chmod 640 key-shared
+out=$("$BU" key info key-shared 2>&1) || fail "key info: $out"
+echo "$out" | grep -q "warning: key file key-shared is accessible by other users" || fail "no key info warning: $out"
+
+# A key path that is a symlink or has a second hard link is refused by the
+# commands that rewrite it, before any passphrase is read: the rename would
+# replace the link (or one name) and leave the real file with the old slots,
+# so a "removed" passphrase would still open the key.
+cp key real.key && ln -s real.key link.key
+cp real.key real-before
+expect_fail "is a symbolic link" "$BU" key passwd --passphrase-file pass --new-passphrase-file pass link.key
+expect_fail "is a symbolic link" "$BU" key remove --passphrase-file pass link.key
+expect_fail "is a symbolic link" "$BU" key add --passphrase-file pass --new-passphrase-file pass link.key
+[ -L link.key ] || fail "symlinked key path replaced"
+cmp -s real.key real-before || fail "real key file changed"
+ln real.key hard.key
+expect_fail "other hard links" "$BU" key remove --passphrase-file pass real.key
+rm hard.key
+# Reading through a link is fine.
+"$BU" check --key link.key --passphrase-file pass full.bk
 
 # add: a second passphrase opens the same key.
 printf 'second passphrase\n' > pass2
@@ -121,5 +158,26 @@ if command -v script >/dev/null; then
         | script -qec "$BU key init --kdf-memory 8 --kdf-time 1 tty.key" /dev/null 2>&1) || true
     echo "$out" | grep -q "did not match" || fail "mismatched new passphrases accepted: $out"
     [ ! -e tty.key ] || fail "key file written after a mismatch"
+    # Ctrl-Z at the prompt must not stop bu with echo off (the shell the user
+    # returns to would be silent): SIGTSTP is held until echo is back on.
+    # `set -m` gives bu its own process group under a job-control shell, so a
+    # SIGTSTP is not discarded as it would be in an orphaned group.
+    if command -v pgrep >/dev/null && command -v ps >/dev/null; then
+        mkfifo ttyin
+        timeout 20 script -qec "bash -c 'set -m; $BU check --key key full.bk'" /dev/null < ttyin > tstp.out 2>&1 &
+        exec 7> ttyin
+        pid=""
+        for _ in $(seq 50); do pid=$(pgrep -n -f "^$BU check --key key full.bk" || true); [ -n "$pid" ] && break; sleep 0.1; done
+        [ -n "$pid" ] || fail "bu under script(1) did not start"
+        sleep 0.3
+        kill -TSTP "$pid"
+        sleep 0.3
+        st=$(ps -o stat= -p "$pid" || true)
+        case "$st" in ""|T*) kill -KILL "$pid" 2>/dev/null || true; exec 7>&-; wait || true
+                          fail "SIGTSTP at the prompt stopped bu with echo off (state '$st')" ;; esac
+        (echo "integration test passphrase" >&7) 2>/dev/null || true
+        exec 7>&-
+        wait || true
+    fi
 fi
 note ok

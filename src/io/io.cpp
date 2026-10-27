@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <stdio.h>  // rename
 #include <string.h>
+#include <sys/random.h>  // getrandom
 #include <sys/stat.h>
 #include <sys/uio.h>   // writev
 #include <time.h>
@@ -149,11 +150,29 @@ bool readWholeFile(const char* path, u64 maxBytes, Array<u8>& out, String& err) 
 }
 
 bool writeFileAtomic(const char* path, const void* data, usize n, String& err) {
-    String tmp(path);
-    tmp.append(".tmp.");
-    tmp.appendU64(u64(getpid()));
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) return errSet(err, tmp.c_str(), ": ", strerror(errno));
+    // The temp name is the target's plus 16 random hex digits, created with
+    // O_EXCL | O_NOFOLLOW: anyone who can write in the directory could plant
+    // a symlink or a file of their own at a predictable name (the pid), and
+    // an O_TRUNC open would follow the link — clobbering its target, as root
+    // anything — or write our data into their file with their mode. Here an
+    // existing name is never opened, only skipped. O_TMPFILE + linkat was
+    // the alternative; it still needs a named temp to rename over the
+    // target (linkat will not replace), so it only adds a second code path.
+    String tmp;
+    int fd = -1;
+    for (u32 attempt = 0; attempt < 8 && fd < 0; ++attempt) {
+        u8 rnd[8];
+        if (getrandom(rnd, sizeof rnd, 0) != ssize_t(sizeof rnd)) return errSet(err, "getrandom: ", strerror(errno));
+        static const char kDigits[] = "0123456789abcdef";
+        char hex[16];
+        for (u32 i = 0; i < 8; ++i) { hex[2 * i] = kDigits[rnd[i] >> 4]; hex[2 * i + 1] = kDigits[rnd[i] & 15]; }
+        tmp.assign(StringView(path));
+        tmp.append(".tmp."_s);
+        tmp.append(StringView(hex, 16));
+        fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0 && errno != EEXIST) return errSet(err, tmp.c_str(), ": ", strerror(errno));
+    }
+    if (fd < 0) return errSet(err, path, ": cannot create a temporary file beside it");
     bool ok = writeAll(fd, data, n) && fsync(fd) == 0;
     const int e = errno;
     if (::close(fd) != 0) ok = false;
@@ -163,6 +182,17 @@ bool writeFileAtomic(const char* path, const void* data, usize n, String& err) {
         ::unlink(tmp.c_str());
         return errSet(err, path, ": ", strerror(re));
     }
+    // The rename is durable only once the directory is: without this fsync a
+    // crash can bring back the old file (for a key file, a removed slot).
+    const StringView p(path);
+    const u32 slash = p.findLast('/');
+    String dir(slash == kInvalidIndex ? "."_s : (slash == 0 ? "/"_s : p.first(slash)));
+    const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd < 0) return errSet(err, dir.c_str(), ": ", strerror(errno));
+    const bool synced = fsync(dfd) == 0;
+    const int de = errno;
+    ::close(dfd);
+    if (!synced) return errSet(err, dir.c_str(), ": ", strerror(de));
     return true;
 }
 

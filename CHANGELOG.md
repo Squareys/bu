@@ -7,6 +7,43 @@ own version number (docs/format.md); a release that changes it says so.
 
 ## [Unreleased]
 
+### Security
+- The key file and the index are replaced through a temp file with a random
+  name, created with `O_EXCL | O_NOFOLLOW` and mode 0600, and the directory
+  is fsynced after the rename. The old temp name (`PATH.tmp.PID`) was
+  predictable and opened with `O_TRUNC`: anyone who could write in the
+  directory could plant a symlink there and have bu (as root: any file)
+  overwrite its target, or keep a world-readable copy of the wrapped key.
+- `bu key add`, `passwd` and `remove` refuse a key path that is a symlink or
+  has other hard links, before asking for a passphrase. The rename replaced
+  the link, not the file behind it, so the real file kept a removed
+  passphrase's slot.
+- `bu restore` unlinks a name already in the target and creates the file
+  with `O_EXCL` instead of opening it with `O_TRUNC`: a planted hard link is
+  no longer written through, and a planted FIFO no longer hangs the restore.
+  Directory modes are set through an `O_NOFOLLOW` descriptor, so a directory
+  swapped for a symlink cannot redirect the chmod.
+- `bu restore` restores set-uid and set-gid bits on files only when run as
+  root, as GNU tar does.
+- `bu list` escapes control bytes in names and symlink targets (`\n`,
+  `\xHH`, `\\`): a file name could send escape sequences to the terminal.
+- A key slot whose Argon2id memory cannot be allocated is skipped with a
+  warning and the other slots are tried, instead of ending the unlock.
+- A passphrase file that group or others can access is warned about, and
+  `bu key info` now warns about such a key file, as the other commands did.
+- Slots below RFC 9106's KDF recommendations (64 MiB / 3 passes, or 2 GiB /
+  1 pass) are warned about when written and marked "(weak)" by `key info`.
+- Ctrl-Z at the passphrase prompt no longer stops bu with terminal echo off;
+  it takes effect once the terminal is restored.
+- LZ4 payloads above its ~2 GiB `int` limit are stored and refused on read,
+  instead of reaching LZ4 as wrapped sizes.
+- Per-container keys of a backup being written are wiped on destruction.
+- docs/design.md: no locking for concurrent `bu key` commands; removing a
+  passphrase does not revoke it for someone holding an older copy of the
+  key file (only a new key does); the worker threads share one key schedule
+  per container (not one per thread).
+- Binary size 231 232 → 234 344 bytes.
+
 ### Changed
 - **Key file format 2: a random master key in passphrase keyslots (the LUKS
   design).** `bu key init KEYFILE` draws the 32-byte master key from

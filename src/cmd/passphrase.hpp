@@ -33,9 +33,17 @@ struct Passphrase {
 // else from the terminal, showing `prompt`. `confirm`: on the terminal, ask
 // twice and require the same answer (for a new passphrase). `hint` names the
 // flags that would have supplied it, for the error when there is no
-// terminal. Refuses an empty or over-long passphrase.
+// terminal. Refuses an empty or over-long passphrase. Warns (warnIfShared)
+// when `file` is accessible by other users.
 [[nodiscard]] bool passphraseGet(const char* file, int fd, StringView prompt, StringView hint, bool confirm,
                                  Passphrase& out, String& err);
+
+// "bu: warning: <what> <path> is accessible by other users" when `path` has
+// any group or other permission bits. Key files and passphrase files.
+void warnIfShared(const char* what, const char* path);
+// One warning per slot keyFileUnlock skipped (bits of `kdfFailed`), naming
+// the memory it asked for.
+void warnKdfSkipped(const char* path, const KeyFile& f, u32 kdfFailed);
 
 // For create, restore, merge, check, index and list: check the CPU, read
 // a.key, get the passphrase (a.passFile, a.passFd or the terminal), unlock,

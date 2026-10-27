@@ -64,16 +64,35 @@ void modeString(const Entry& e, char out[11]) {
     out[10] = 0;
 }
 
+// A path or link target from a backup, printed so that it cannot drive the
+// terminal: a name may hold any byte but '/' and NUL, and ESC sequences in
+// one could rewrite the screen or, on some terminals, the clipboard or the
+// title. Control bytes and DEL become \n, \t, \r or \xHH, and a backslash
+// becomes \\ so the output stays unambiguous. Bytes from 0x80 up pass
+// through: UTF-8 names stay readable.
+void printEscaped(StringView p) {
+    for (u32 i = 0; i < p.count; ++i) {
+        const u8 c = u8(p[i]);
+        if (c == '\\') fputs("\\\\", stdout);
+        else if (c == '\n') fputs("\\n", stdout);
+        else if (c == '\t') fputs("\\t", stdout);
+        else if (c == '\r') fputs("\\r", stdout);
+        else if (c < 0x20 || c == 0x7f) printf("\\x%02x", c);
+        else putchar(c);
+    }
+}
+
 void printEntries(const Snapshot& s) {
     for (const Entry& e : s.entries) {
         char mode[11], when[32];
         modeString(e, mode);
         fmtTime(e.mtimeNs, when, sizeof when);
         const StringView p = entryPath(s, e);
-        printf("%s %5u %5u %12llu %s %.*s", mode, e.uid, e.gid, (unsigned long long)e.size, when, int(p.count), p.ptr);
+        printf("%s %5u %5u %12llu %s ", mode, e.uid, e.gid, (unsigned long long)e.size, when);
+        printEscaped(p);
         if (e.type == kEntrySymlink) {
-            const StringView t = entryTarget(s, e);
-            printf(" -> %.*s", int(t.count), t.ptr);
+            fputs(" -> ", stdout);
+            printEscaped(entryTarget(s, e));
         }
         printf("\n");
     }

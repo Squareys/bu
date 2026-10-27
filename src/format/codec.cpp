@@ -11,13 +11,20 @@ namespace bk {
 
 static_assert(sizeof(CodecState) >= sizeof(LZ4_stream_t), "CodecState must hold an LZ4_stream_t");
 
+// LZ4 counts in int. Payloads above LZ4_MAX_INPUT_SIZE (~2 GiB; metadata
+// records may reach kMaxMetaRecord, 3 GiB) are stored, never handed to LZ4:
+// int(n) would wrap negative there. A reader refuses an LZ4 payload that
+// claims more, which no writer produces.
+static_assert(LZ4_MAX_INPUT_SIZE < 0x7fffffff - 5, "LZ4 sizes fit an int with the header");
+
 u32 codecBound(u32 n) {
+    if (n > u32(LZ4_MAX_INPUT_SIZE)) return 1 + n;
     const u32 lz = u32(LZ4_compressBound(int(n)));
     return 5 + (lz > n ? lz : n);
 }
 
 BK_HOT u32 codecEncode(CodecState& st, const u8* raw, u32 n, u8* out, bool compress) {
-    if (compress && n >= 64) {
+    if (compress && n >= 64 && n <= u32(LZ4_MAX_INPUT_SIZE)) {
         // extState: LZ4 initialises the state we own, so no malloc per call
         // and no 16 KB stack frame per worker. Output capped at n-5 bytes so a
         // payload that does not shrink fails fast instead of being finished.
@@ -48,6 +55,7 @@ BK_HOT bool codecDecode(const u8* enc, u32 n, u8* out, u32 rawLen) {
         memCopy(out, enc + 1, rawLen);
         return true;
     }
+    if (n - 5 > u32(LZ4_MAX_INPUT_SIZE) || rawLen > u32(LZ4_MAX_INPUT_SIZE)) return false;
     // LZ4_decompress_safe never writes past rawLen and never reads past n-5,
     // whatever the input: the bounds-checked decoder, as untrusted input needs
     // (an authenticated payload is still only as well-formed as its writer).

@@ -159,10 +159,16 @@ struct TrailerEntry {
     u32 rawLen;
 };
 
+// The keys are wiped on destruction, as Container's are.
 struct ContainerWriter {
     OutStream* out = nullptr;
     ContainerKeys keys;
     Array<TrailerEntry> chunks;
+
+    ContainerWriter() = default;
+    ContainerWriter(const ContainerWriter&) = delete;
+    ContainerWriter& operator=(const ContainerWriter&) = delete;
+    ~ContainerWriter() { secureZero(&keys, sizeof keys); }
 };
 
 // Fresh salt + keys; writes the header.
