@@ -171,10 +171,20 @@ bool walkFrom(const Chain& c, Window& w, u32 si, u64 end, Array<Seg>& rev, Strin
 // end, so a walk that breaks after it is damage, not a tail. Unencrypted,
 // stored chunk data may contain trailer bytes (a backup of a chain), so a
 // candidate that does not walk is only skipped.
+//
+// Each skipped candidate costs a walk that can go back through many
+// segments, so data planting magic after magic (an unencrypted chain backed
+// up into an unencrypted chain, or a hostile file) would make recovery
+// quadratic. After kMaxFailedWalks such walks the chain is called damaged
+// instead: a real tail is one interrupted segment, and finding its start
+// takes one walk.
+constexpr u32 kMaxFailedWalks = 64;
+static_assert(kMaxFailedWalks == 64, "the damage message below names the number");
 bool recoverEnd(const Chain& c, Window& w, u32 si, Array<Seg>& rev, u64& end, String& err) {
     const Source& src = c.sources[si];
     Array<u8> block;
     constexpr u32 kBlock = 1u << 20;
+    u32 failedWalks = 0;
     u64 hi = src.size;
     while (hi > kHeaderBytes + kTrailerBytes - 1) {
         const u64 lo = hi > kBlock ? hi - kBlock : 0;
@@ -191,6 +201,10 @@ bool recoverEnd(const Chain& c, Window& w, u32 si, Array<Seg>& rev, u64& end, St
             if (!c.plain) return false;
             rev.clear();
             err.clear();
+            if (++failedWalks == kMaxFailedWalks)
+                return failAt(err, src.path.view(), src.size,
+                              "no complete segment at the end, and the last 64 trailer candidates before it "
+                              "do not walk back to the start (damaged)");
         }
         if (lo == 0) break;
         hi = lo + 7;      // a magic straddling the block boundary is found in the next block
@@ -200,7 +214,10 @@ bool recoverEnd(const Chain& c, Window& w, u32 si, Array<Seg>& rev, u64& end, St
     return true;
 }
 
-bool openSource(Chain& c, Source& s, String& err) {
+// `ownLock`: the caller (create) holds the chain's exclusive lock on this
+// descriptor, or on another one for the same file, and nobody else can be
+// writing it.
+bool openSource(Chain& c, Source& s, bool ownLock, String& err) {
     struct stat st;
     if (fstat(s.fd, &st) != 0) return errSet(err, s.path.view(), ": ", strerror(errno));
     s.seekable = S_ISREG(st.st_mode);
@@ -209,8 +226,17 @@ bool openSource(Chain& c, Source& s, String& err) {
         // A shared lock that cannot be had means a create is appending right
         // now: an incomplete tail is then expected, not a fault. Released at
         // once, so a long restore never makes a create wait or fail.
-        if (flock(s.fd, LOCK_SH | LOCK_NB) != 0) s.writerActive = errno == EWOULDBLOCK;
-        else flock(s.fd, LOCK_UN);
+        //
+        // Never on a descriptor whose owner holds the lock: flock locks
+        // belong to the open file description, so LOCK_SH on create's own
+        // descriptor succeeds as a downgrade and the LOCK_UN then drops
+        // create's lock, letting a second create append in the middle of
+        // the first. Probing through a fresh open() instead would only say
+        // "a writer is active" about ourselves.
+        if (!ownLock) {
+            if (flock(s.fd, LOCK_SH | LOCK_NB) != 0) s.writerActive = errno == EWOULDBLOCK;
+            else flock(s.fd, LOCK_UN);
+        }
     } else if (S_ISDIR(st.st_mode)) {
         return errSet(err, s.path.view(), ": is a directory");
     }
@@ -271,7 +297,7 @@ bool chainArgsOpen(const Array<const char*>& args, Chain& c, String& err) {
             if (s.fd < 0) return errSet(err, a, ": ", strerror(errno));
             s.own = true;
         }
-        if (!openSource(c, s, err)) return false;
+        if (!openSource(c, s, false, err)) return false;
         if (!s.seekable) {
             if (args.count != 1)
                 return errSet(err, a, ": a pipe must be the only CHAIN argument (it is read as one stream)");
@@ -287,7 +313,7 @@ bool chainFdOpen(int fd, const char* name, Chain& c, String& err) {
     Source& s = c.sources.addDefault();
     s.path.assign(StringView(name));
     s.fd = fd;
-    if (!openSource(c, s, err)) return false;
+    if (!openSource(c, s, true, err)) return false;
     return firstHeader(c, err);
 }
 

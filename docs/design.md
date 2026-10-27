@@ -54,6 +54,11 @@ main thread writes the chain and only it takes those signals (the worker
 threads block them), so no write of ours can land after it. A merge
 replacing a chain in place holds the same lock, and a create re-checks,
 once it has the lock, that the path still names the file it opened.
+The lock lives on create's open file description until it exits; create
+reads the base through that same descriptor, so the reader's probe for an
+active writer (a shared lock taken and dropped at once, see below) is
+skipped there: on the lock holder's own description it would succeed as a
+downgrade, and the unlock would hand the chain to a second create.
 
 **What a crash leaves.** After SIGKILL or a power cut, the chain can end
 in a partial segment. A reader that finds no valid trailer at the end scans back for the
@@ -65,7 +70,10 @@ cuts the tail off before appending. In an encrypted chain only bu with the
 key can make a trailer that authenticates, so the first such candidate is
 the answer and a broken walk from it is damage; in an unencrypted chain a
 trailer can sit inside stored chunk data (a backup of a chain), so a
-candidate whose walk fails is skipped.
+candidate whose walk fails is skipped. Each skipped candidate costs a walk
+that may cross many segments, so a tail full of planted magic would make
+recovery quadratic: after 64 failed walks the reader stops and reports the
+chain as damaged. A real tail is one interrupted segment and needs one walk.
 
 **Locks on network file systems.** `flock` works between processes on one
 machine everywhere, and between machines on NFS (the client maps it to
