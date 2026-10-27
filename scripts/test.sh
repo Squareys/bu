@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
 # Run everything: build, unit tests, integration tests.
 #
-#   scripts/test.sh [--asan|--tsan] [FILTER]
+#   scripts/test.sh [--asan|--tsan] [--smoke] [FILTER]
 #
 # --asan runs the same suite against the AddressSanitizer + UBSan build (leak
 # checking on), --tsan against the ThreadSanitizer build.
+# --smoke runs the smoke tests: the unit tests and the quick end-to-end
+# scripts in SMOKE below (create, increment, restore, merge, tamper, CLI),
+# a few seconds in all. CI's build job runs them; the e2e job runs everything.
 # FILTER (a substring) selects integration scripts by name; unit tests always
 # run in full (they take well under a second).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The smoke subset: no sleeps, no 5 GiB sparse file, no Argon2 or terminal
+# key tests.
+SMOKE="01-incremental 02-chain-merge 03-tamper 06-cli 11-list-escape"
 ASAN=""
 FILTER=""
+SMOKE_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --asan) ASAN="--asan" ;;
         --tsan) ASAN="--tsan" ;;
-        -*) echo "test.sh: unknown option '$arg' (expected --asan, --tsan or a filter)" >&2; exit 2 ;;
+        --smoke) SMOKE_ONLY=1 ;;
+        -*) echo "test.sh: unknown option '$arg' (expected --asan, --tsan, --smoke or a filter)" >&2; exit 2 ;;
         *) [ -z "$FILTER" ] || { echo "test.sh: one filter only" >&2; exit 2; }; FILTER="$arg" ;;
     esac
+done
+for s in $SMOKE; do   # a renamed script must not silently drop out of the smoke tests
+    [ -f "tests/integration/$s.sh" ] || { echo "test.sh: smoke test '$s' does not exist" >&2; exit 2; }
 done
 BUILD_DIR="$(scripts/build.sh $ASAN | tail -1)"
 export BU="$BUILD_DIR/bu"
@@ -31,6 +42,7 @@ echo "== unit tests"
 pass=0; failed=0; failures=""
 for t in tests/integration/[0-9]*.sh; do
     [ -n "$FILTER" ] && [[ "$t" != *"$FILTER"* ]] && continue
+    [ "$SMOKE_ONLY" = 1 ] && [[ " $SMOKE " != *" $(basename "$t" .sh) "* ]] && continue
     echo "== $t"
     if bash "$t"; then pass=$((pass + 1)); else failed=$((failed + 1)); failures="$failures $t"; fi
 done
