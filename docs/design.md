@@ -436,7 +436,12 @@ resolves every snapshot and confirms every reference is present.
    reads, so it keeps less than one read in flight on average: on an NVMe,
    8 readers made a full backup of a tree of small files 1.3-1.4× faster
    than 4, and of one big file 1.4× (with the ring grown from 12 to 16
-   blocks to feed them); on tmpfs the extra readers cost ~3%. A big file is
+   blocks to feed them). Without `-j`, readers are min(8, CPUs / 2); with
+   `-j N`, (N + 1) / 2, at most 8. Readers sleep on a disk but are busy on
+   a fast source, so 8 readers plus a worker per CPU oversubscribed a
+   20-CPU machine and cost 8% on tmpfs; the default worker count leaves
+   them room (14 workers: tmpfs back to the old speed, nothing lost on the
+   NVMe; 12 was faster on tmpfs but 10% slower reading the NVMe). A big file is
    read as 1 MiB ranges handed out in turn, so each reader's descriptor
    sees a strided pattern; that did not defeat the kernel's readahead
    (four threads reading 1 MiB ranges in turn from separate descriptors
@@ -446,7 +451,8 @@ resolves every snapshot and confirms every reference is present.
    block's short tail into the new block's headroom, selects cuts, numbers
    chunks. No file data is copied: jobs point into the blocks, which are
    reference-counted.
-4. **workers** (`-j N`, default: online CPUs): keyed-BLAKE3 ID, dedupe lookup,
+4. **workers** (`-j N`; default: the online CPUs less three quarters of the
+   readers, 14 on 20 CPUs): keyed-BLAKE3 ID, dedupe lookup,
    LZ4, AES-GCM.
 5. **writer** (main thread): takes finished jobs strictly in sequence, drops
    duplicates (first occurrence wins), `writev`s the records straight from the

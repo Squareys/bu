@@ -60,8 +60,10 @@ own version number (docs/format.md); a release that changes it says so.
   defaults to 8 threads (`-j` still overrides): about 1.6× faster to the
   same NVMe, at half the CPU.
 - `bu create` runs up to 8 reader threads (was 4) and a 16 MiB read ring
-  (was 12 MiB): a full backup from an NVMe is about 1.2-1.4× faster; on
-  tmpfs the change costs ~3%.
+  (was 12 MiB), and without `-j` it runs the CPUs less three quarters of
+  the readers as workers (14 on 20 CPUs, was 20) so the readers do not
+  oversubscribe the machine: a full backup from an NVMe is 1.2-1.5×
+  faster, from tmpfs as fast as before.
 
 ### Changed
 - **Key file format 2: a random master key in passphrase keyslots (the LUKS
