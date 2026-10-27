@@ -520,16 +520,18 @@ these are CPU numbers; on disk the readers' queue depth matters instead).
 
 | create (full) | -j 1 | -j 2 | -j 4 | -j 8 | -j 20 |
 |---|---|---|---|---|---|
-| wall time | 0.88 s | 0.70 s | 0.37 s | 0.25 s | 0.33 s |
-| throughput | 1.2 GB/s | 1.5 GB/s | 2.7 GB/s | 4.0 GB/s | 3.1 GB/s |
+| wall time | 0.91 s | 0.78 s | 0.42 s | 0.26 s | 0.29 s |
+| throughput | 1.2 GB/s | 1.4 GB/s | 2.6 GB/s | 4.2 GB/s | 3.7 GB/s |
 
 Beyond ~8 workers the writer's copy into the output file and the E-cores
-flatten the curve.
+flatten the curve. (Median of three runs at commit 47cc455. `-j 20` runs 8
+readers on top of 20 workers; without `-j`, create runs 14 workers on this
+machine for that reason.)
 
 | increment | files cache | no files cache |
 |---|---|---|
-| unchanged tree | 0.035 s, 0 files read, 43 KB | 0.23 s, 1 GiB read, 43 KB |
-| 1% scattered change | 0.17 s, 719 MiB read, 39 MB | 0.23 s, 1 GiB read, 39 MB |
+| unchanged tree | 0.038 s, 0 files read, 44 KB | 0.16 s, 1 GiB read, 44 KB |
+| 1% scattered change | 0.13 s, 719 MiB read, 39 MB | 0.17 s, 1 GiB read, 39 MB |
 
 The 1% change rewrites 4 KiB at ~1 000 random offsets in the large files
 (every one of them is touched, hence 719 MiB still read), appends to every
@@ -537,12 +539,17 @@ log and rewrites 1% of the small files. Each 4 KiB write dirties one or two
 ~20 KiB chunks, so the increment is ~3.6× the bytes changed: that is the
 price of CDC's chunk size, and why SQLite gets page-sized chunks.
 
-restore (full + increment, verified): 0.27 s, 3.7 GB/s; check: 8.5 GB/s;
-merge: 3.0 GB/s.
+restore (full + increment, verified): 0.29 s, 3.7 GB/s; check: 0.09 s,
+12 GB/s (was 8.5); merge: 3.0 GB/s. On tmpfs restore is bound by creating
+and writing the files, so the span reads change its time little but halve
+its CPU. The disk-bound picture, where they matter, is in
+[benchmarks.md](benchmarks.md): from a cold NVMe, check went from 0.97 s to
+0.42 s for a 1.2 GB backup, restore to the same disk from 2.05 s to 1.45 s,
+and create from 2.01 s to 1.69 s.
 
 ## 10. Size
 
-Stripped binary: **234 344 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **238 808 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
@@ -551,9 +558,9 @@ glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 | Argon2id + BLAKE2b (libsodium, ref + SSSE3 + AVX2 + AVX-512F kernels, -O3) | 32 377 |
 | AES-256-GCM (libsodium AES-NI, -O3) | 21 236 |
 | LZ4 (inlined into codecEncode/codecDecode) | 8 510 |
-| bu hot path (-O2) | 4 105 |
-| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 76 967 |
-| crt and runtime glue | 5 203 |
+| bu hot path (-O2) | 4 269 |
+| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 81 028 |
+| crt and runtime glue | 5 277 |
 
 The remaining ~21 KB of the file are ELF headers, dynamic-linking tables
 (`.dynsym`, `.dynstr`, relocations for the ~90 glibc symbols used) and
@@ -564,7 +571,8 @@ The passphrase key file (§3) added 56 KB: 32 KB of Argon2id and BLAKE2b and
 SIMD kernels stay: unlock time is a security parameter, and a faster kernel
 buys more passes or memory in the same two seconds. The security fixes
 after it (safe temp files, restore hardening, escaped listings, warnings)
-added 3 KB of cold code.
+added 3 KB of cold code. The read-path work (spans, prefetch, merged writes
+and the overlapped batches in restore, eight readers in create) added 4.5 KB.
 
 The size rule is "small by default, speed wins on hot paths", so the budget
 went to the SIMD variants: the AVX-512 BLAKE3 kernel alone is 21 KB, and

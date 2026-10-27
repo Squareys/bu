@@ -53,19 +53,26 @@ own version number (docs/format.md); a release that changes it says so.
 ### Performance
 - `bu restore` and `bu check` read the backup in spans of consecutive
   records (about 256 KiB per `pread`) and prefetch about 16 MiB ahead,
-  instead of one ~20 KiB record per `pread`. From a cold NVMe, `check` is
-  about 3× faster and now outruns a single sequential read of the backup.
+  instead of one ~20 KiB record per `pread`. From a cold NVMe, `check` of a
+  1.2 GB backup takes 0.42 s instead of 0.97 s, faster than one sequential
+  read of the file (docs/benchmarks.md).
 - `bu restore` writes runs of decoded chunks of one file with one `pwrite`,
   creates the next batch's files while the current batch is written, and
-  defaults to 8 threads (`-j` still overrides): about 1.6× faster to the
-  same NVMe, at half the CPU.
+  defaults to 8 threads (`-j` still overrides): 1.45 s instead of 2.05 s
+  for 1.5 GiB from and to the same NVMe, at less than half the CPU.
 - `bu create` runs up to 8 reader threads (was 4) and a 16 MiB read ring
   (was 12 MiB), and without `-j` it runs the CPUs less three quarters of
   the readers as workers (14 on 20 CPUs, was 20) so the readers do not
-  oversubscribe the machine: a full backup from an NVMe is 1.2-1.5×
-  faster, from tmpfs as fast as before.
+  oversubscribe the machine: a full backup from an NVMe to the same disk
+  takes 1.69 s instead of 2.01 s (to tmpfs: 0.80 s instead of 1.31 s);
+  from tmpfs it is as fast as before.
 
 ### Changed
+- `scripts/bench_io.sh` sets up its key with `bu key init` (it called a
+  `keygen` command that no longer exists), adds increments with 1% of the
+  files changed, and prints every run as a multiple of the time to read
+  every file once. docs/benchmarks.md has before/after numbers for this
+  release and the README's performance section is rewritten around them.
 - **Key file format 2: a random master key in passphrase keyslots (the LUKS
   design).** `bu key init KEYFILE` draws the 32-byte master key from
   getrandom and stores it only wrapped in one of eight slots, each sealed
