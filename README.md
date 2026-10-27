@@ -2,23 +2,23 @@
 
 **Encrypted, deduplicating, incremental backups as a Unix filter.**
 
-bu is a very lightweight take on what BorgBackup does, in one small native
-binary (~230 KB stripped, Linux x86-64). `create` writes a backup to stdout
-and never opens a network connection, so where it goes (a file, S3, ssh,
-tape) is your pipe. There is no repository directory and no server: a key
-file, backup files and a small local index are all there is.
+bu is a lightweight take on what BorgBackup does, in one small native binary
+(~230 KB stripped, Linux x86-64). `create` writes a backup to stdout and never opens a network
+connection, so your pipe decides where it goes: a file, S3, ssh or tape. bu
+has no repository directory and no server. You keep a key file, the backup
+files and a small local index.
 
 - **Encrypted and authenticated.** AES-256-GCM (AES-NI) under a fresh key per
-  file; file names, sizes, timestamps and the directory tree are encrypted.
+  file. bu encrypts file names, sizes, timestamps and the directory tree.
 - **Deduplicated.** FastCDC content-defined chunking (~20 KiB average) with
-  keyed-BLAKE3 chunk IDs: an edit or an insertion stores only the chunks
-  around it.
-- **Incremental from a small index.** An increment stores only chunks the
-  previous snapshot did not have, and reads only files whose metadata changed
+  keyed-BLAKE3 chunk IDs: after an edit or an insertion, bu stores the chunks
+  around it and nothing else.
+- **Incremental from a small index.** An increment stores the chunks the
+  previous snapshot did not have, and reads the files whose metadata changed
   (a files cache). It needs the index, never the previous backup.
-- **Mergeable chains.** `merge full inc1` gives a new full backup; later
+- **Mergeable chains.** `merge full inc1` gives a new full backup, and later
   increments keep working with it.
-- **SQLite-aware.** Databases are chunked at their page size, so an increment
+- **SQLite-aware.** bu chunks databases at their page size, so an increment
   after scattered updates is about the size of the changed pages.
 - **Fast and multi-threaded.** A parallel pipeline (~4 GB/s create, ~3.7 GB/s
   verified restore on a laptop, data on tmpfs) whose output does not depend on
@@ -39,48 +39,90 @@ file, backup files and a small local index are all there is.
 
 ## Quick start
 
+Make a key file. bu draws a random master key and stores it under your
+passphrase, which it asks for twice. Keep a copy of the file somewhere other
+than the backups.
+
 ```sh
-# 1. A key file: a random master key, stored only under your passphrase
-#    (asked twice). Keep a copy of the file somewhere other than the backups.
 bu key init ~/.bu.key
-
-# 2. A full backup, which also writes the index the next increment needs.
-bu create --key ~/.bu.key --index-out data.idx ~/data > full.bk
-
-# 3. Increments: only new chunks are stored, only changed files are read.
-bu create --key ~/.bu.key --base data.idx --index-out data.idx ~/data > inc1.bk
-bu create --key ~/.bu.key --base data.idx --index-out data.idx ~/data > inc2.bk
-
-# 4. Restore the latest state of the chain (files in any order), every chunk verified.
-bu restore --key ~/.bu.key -C /restore full.bk inc1.bk inc2.bk
-
-# 5. Roll the chain forward: one file replaces two; inc2.bk keeps working.
-bu merge --key ~/.bu.key full.bk inc1.bk > full2.bk && rm full.bk inc1.bk
-
-# 6. Inspect and verify.
-bu check --key ~/.bu.key full2.bk inc2.bk               # authenticate everything
-bu list  --key ~/.bu.key full2.bk inc2.bk               # what is in there
-bu index --key ~/.bu.key -o data.idx full2.bk inc2.bk   # lost the index? rebuild it
 ```
 
-Every command that takes `--key` asks for the passphrase on the terminal.
-For cron jobs and servers, give it in a file (its first line) or on a file
-descriptor instead:
+Make a full backup. It also writes the index the next increment needs.
+
+```sh
+bu create --key ~/.bu.key --index-out data.idx ~/data > full.bk
+```
+
+Make increments. Each stores the new chunks and reads the changed files.
+
+```sh
+bu create --key ~/.bu.key --base data.idx --index-out data.idx ~/data > inc1.bk
+```
+
+```sh
+bu create --key ~/.bu.key --base data.idx --index-out data.idx ~/data > inc2.bk
+```
+
+Restore the latest state of the chain. The files can come in any order, and
+bu verifies each chunk.
+
+```sh
+bu restore --key ~/.bu.key -C /restore full.bk inc1.bk inc2.bk
+```
+
+Roll the chain forward: one merged file replaces two, and `inc2.bk` keeps
+working with it.
+
+```sh
+bu merge --key ~/.bu.key full.bk inc1.bk > full2.bk && rm full.bk inc1.bk
+```
+
+Authenticate every record of the chain.
+
+```sh
+bu check --key ~/.bu.key full2.bk inc2.bk
+```
+
+List what the chain holds.
+
+```sh
+bu list --key ~/.bu.key full2.bk inc2.bk
+```
+
+Rebuild a lost index from the chain.
+
+```sh
+bu index --key ~/.bu.key -o data.idx full2.bk inc2.bk
+```
+
+Each command that takes `--key` asks for the passphrase on the terminal. For
+cron jobs and servers, put it in a file that only you can read (bu uses the
+first line):
 
 ```sh
 (umask 077; printf '%s\n' 'the passphrase' > /root/.bu-pass)
+```
+
+and name that file:
+
+```sh
 bu create --key /root/.bu.key --passphrase-file /root/.bu-pass \
     --base data.idx --index-out data.idx /srv/data > "/backup/data-$(date +%F).bk"
+```
+
+Or hand it over on a file descriptor, here from a password manager:
+
+```sh
 bu check --key ~/.bu.key --passphrase-fd 3 full2.bk inc2.bk 3< <(pass show bu)
 ```
 
 Reading commands take the whole chain: the full backup (or merged file) and
-every increment since. Backups are found by snapshot ID, not by file name, so
-renaming files or passing them in any order is fine.
+each increment since. bu finds backups by snapshot ID, not by file name, so
+you can rename the files and pass them in any order.
 
 For SQLite, back up a consistent copy (`sqlite3 app.db ".backup app-copy.db"`,
-the backup API, or a filesystem snapshot), not a database that is being
-written to.
+the backup API, or a filesystem snapshot), not a database another process is
+writing to.
 
 ## How it works
 
@@ -93,61 +135,70 @@ written to.
                                          reference it, store nothing
 ```
 
-**Chunking.** Files are cut where a rolling gear hash says so (FastCDC,
-4 KiB minimum, ~20 KiB average, 64 KiB maximum), so cut points depend on the
-content, not on offsets: an insertion at the start of a file changes only the
-first chunk. SQLite databases are recognised by their header and cut at page
-boundaries instead.
+**Chunking.** bu cuts files where a rolling gear hash says so (FastCDC,
+4 KiB minimum, ~20 KiB average, 64 KiB maximum). Cut points depend on the
+content, not on offsets: an insertion at the start of a file changes the
+first chunk and no other. bu recognises SQLite databases by their header and
+cuts them at page boundaries instead.
 
 **Dedupe and the index.** Each chunk's ID is a keyed BLAKE3 hash of its
-content. The index is the latest snapshot itself: the set of chunks the next
-increment may reference without storing, the base its file list is
-delta-encoded against, and a files cache (device, inode, size, mtime, ctime)
-that lets unchanged files be skipped without opening them.
+content. The index is the latest snapshot itself. It serves as the set of
+chunks the next increment may reference without storing them, as the base
+the next file list is delta-encoded against, and as a files cache (device,
+inode, size, mtime, ctime) that lets bu skip unchanged files without opening
+them.
 
-**Records.** Each chunk is LZ4-compressed when that helps, then sealed with
-AES-256-GCM. Every file has its own random salt and so its own AES key, and
-nonces are sequence numbers, so a nonce never repeats under one key. A reader
-re-hashes every decrypted chunk against its ID.
+**Records.** bu compresses each chunk with LZ4 when that makes it smaller,
+then seals it with AES-256-GCM. Each file has its own random salt and so its
+own AES key, and nonces are sequence numbers, so a nonce never repeats under
+one key. A reader re-hashes each decrypted chunk against its ID.
 
-**Merge.** `merge` writes one self-contained backup holding the chain's latest
-snapshot and exactly the chunks it references, under the same snapshot ID, so
-increments made from that snapshot resolve against the merged file. Older
-snapshots are not kept: history is what keeping old files is for.
+**Merge.** `merge` writes one self-contained backup with the chain's latest
+snapshot and the chunks it references, under the same snapshot ID, so
+increments made from that snapshot resolve against the merged file. The
+merged file drops older snapshots; keep the old files if you want history.
 
-In depth: [docs/design.md](docs/design.md) (why it is built this way) and
+In depth: [docs/design.md](docs/design.md) (why bu is built this way) and
 [docs/format.md](docs/format.md) (the file format, byte by byte).
 
 ## Piping backups anywhere
 
 `create` and `merge` stream to stdout. Reading commands (`restore`, `check`,
 `list`, `index`, `merge`) take files on disk, so fetch a chain back before
-reading it.
+you read it.
+
+To a file:
 
 ```sh
-# To a file
 bu create --key ~/.bu.key --base data.idx --index-out data.idx ~/data > "data-$(date +%F).bk"
+```
 
-# To another machine over ssh
+To another machine over ssh:
+
+```sh
 bu create --key ~/.bu.key --base data.idx --index-out data.idx ~/data \
     | ssh backup-host "cat > backups/data-$(date +%F).bk"
+```
 
-# To S3, keeping the new index only if the upload succeeded
+To S3, keeping the new index only if the upload succeeded (one script: the
+`pipefail` setting and the pipeline belong together):
+
+```sh
 set -o pipefail
 bu create --key ~/.bu.key --base data.idx --index-out data.idx.new ~/data \
     | aws s3 cp - "s3://my-bucket/data-$(date +%F).bk" && mv data.idx.new data.idx
 ```
 
-bu writes the index atomically after the backup was fully written, and a dead
-pipe reader is a reported error that leaves the index alone. But bu cannot
-see whether the far end stored what it received: when the upload can fail
-after bu is done, as with S3 above, write the index to a new name and move it
-into place only on success, so the next increment is never based on a backup
+bu writes the index atomically after it has written the whole backup, and
+reports a dead pipe reader as an error without touching the index. bu cannot
+see whether the far end stored what it received. When the upload can fail
+after bu has finished, as with S3 above, write the index to a new name and
+move it into place on success, so you never base an increment on a backup
 that does not exist.
 
-**Rotating chains.** Merging keeps a chain short without breaking it: merge
-the full backup with the oldest increments into a new full backup, check it,
-then delete the inputs.
+**Rotating chains.** Merge the full backup with the oldest increments into a
+new full backup, check it, then delete the inputs. The chain stays short and
+keeps working.
 
 ```sh
 bu merge --key ~/.bu.key full.bk inc1.bk inc2.bk inc3.bk > full-new.bk \
@@ -156,53 +207,53 @@ bu merge --key ~/.bu.key full.bk inc1.bk inc2.bk inc3.bk > full-new.bk \
 ```
 
 `merge` needs the chain from a full backup up to the snapshot it merges.
-`inc4.bk`, and every increment made later from the index, keeps working with
-the merged file.
+`inc4.bk`, and each increment you make later from the index, keeps working
+with the merged file.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `bu key init KEYFILE` | Make a new key file: a random master key in slot 0 under a new passphrase (asked twice). Never overwrites a file. |
+| `bu key init KEYFILE` | Make a new key file: a random master key in slot 0 under a new passphrase (asked twice). Refuses to overwrite a file. |
 | `bu key add KEYFILE` | Unlock with a passphrase, then add another one in a free slot (8 slots). |
 | `bu key passwd KEYFILE` | Change the passphrase you unlock with. |
-| `bu key remove KEYFILE [--slot N]` | Remove the slot you unlock with, or slot `N`. The last usable slot cannot be removed. |
-| `bu key info KEYFILE` | Show the key ID and each slot's KDF costs; never a secret. |
-| `bu create --key KEYFILE --index-out INDEX [--base INDEX] [-j N] [--no-files-cache] [-v] PATH... > BACKUP` | Stream a backup of `PATH...` to stdout. With `--base`, an increment: only chunks the base index does not list are stored, and files whose metadata is unchanged are not read (`--no-files-cache` reads them anyway). Writes the new index atomically; `--index-out` may name the same file as `--base`. |
-| `bu restore --key KEYFILE [-C DIR] [--path PREFIX] [-j N] [-v] BACKUP...` | Restore the latest snapshot of the chain into `DIR` (default: the current directory), optionally only paths under `PREFIX`. |
-| `bu merge --key KEYFILE [-j N] [-v] BACKUP... > MERGED` | Write one self-contained backup of the chain's latest snapshot, holding only the chunks it references. |
-| `bu check --key KEYFILE [-j N] [-v] BACKUP...` | Authenticate every record and verify every snapshot is complete. |
+| `bu key remove KEYFILE [--slot N]` | Remove the slot you unlock with, or slot `N`. Refuses to remove the last usable slot. |
+| `bu key info KEYFILE` | Show the key ID and each slot's KDF costs. Prints no secret. |
+| `bu create --key KEYFILE --index-out INDEX [--base INDEX] [-j N] [--no-files-cache] [-v] PATH... > BACKUP` | Stream a backup of `PATH...` to stdout. With `--base`, make an increment: store the chunks the base index does not list, and skip reading files whose metadata is unchanged (`--no-files-cache` reads them anyway). Writes the new index atomically; `--index-out` may name the same file as `--base`. |
+| `bu restore --key KEYFILE [-C DIR] [--path PREFIX] [-j N] [-v] BACKUP...` | Restore the latest snapshot of the chain into `DIR` (default: the current directory). With `--path`, restore the paths under `PREFIX`. |
+| `bu merge --key KEYFILE [-j N] [-v] BACKUP... > MERGED` | Write one self-contained backup of the chain's latest snapshot, with the chunks it references and no others. |
+| `bu check --key KEYFILE [-j N] [-v] BACKUP...` | Authenticate every record and verify that every snapshot is complete. |
 | `bu list --key KEYFILE BACKUP...` or `bu list --key KEYFILE INDEX` | Show the files, and the latest snapshot's tree. |
 | `bu index --key KEYFILE -o INDEX BACKUP...` | Rebuild a lost index, files cache included, from the chain. |
 | `bu help` | Print usage. |
 
 `-j N` sets the worker threads (default: online CPUs); `create` adds up to
-four reader threads, a chunker and a writer. Unknown, repeated or malformed
-options are refused by name.
+four reader threads, a chunker and a writer. bu refuses unknown, repeated or
+malformed options by name.
 
-**Passphrases.** Every command that unlocks the key file (all of the above
-with `--key`, and `key add`, `passwd` and `remove`) reads the passphrase from
+**Passphrases.** Each command that unlocks the key file (the commands above
+with `--key`, plus `key add`, `passwd` and `remove`) reads the passphrase from
 `--passphrase-file PATH` (the first line, without its line ending), from
 `--passphrase-fd N` (up to the first newline), or else from the terminal with
 echo off. `key add` and `key passwd` read the new passphrase from
 `--new-passphrase-file` or `--new-passphrase-fd`; `key init` reads its one
-passphrase from `--passphrase-file` or `--passphrase-fd`. Without a terminal
-and without one of these, the command fails and names them.
+passphrase from `--passphrase-file` or `--passphrase-fd`. With no terminal and
+none of these options, the command fails and names them.
 
-**KDF costs.** `key init`, `add` and `passwd` time Argon2id on this machine
-and pick the passes so one unlock takes about 2 s, with
-min(1 GiB, RAM/4) of memory. `--kdf-target-ms MS` (100–60000) changes the
-target, `--kdf-memory MIB` (8–4096) fixes the memory, and `--kdf-time PASSES`
-(1–100) fixes the passes and skips the timing. A slot needs its memory free
-on every machine that unlocks it: for a small server, add a slot there, or
-pass `--kdf-memory 256`.
+**KDF costs.** `key init`, `add` and `passwd` time Argon2id on your machine
+and pick the passes so one unlock takes about 2 s, with min(1 GiB, RAM/4) of
+memory. `--kdf-target-ms MS` (100–60000) changes the target, `--kdf-memory
+MIB` (8–4096) fixes the memory, and `--kdf-time PASSES` (1–100) fixes the
+passes and skips the timing. Each machine that unlocks a slot needs that
+slot's memory free. For a small server, add a slot on the server, or pass
+`--kdf-memory 256`.
 
 **Exit status**
 
 | Code | Meaning |
 |---|---|
 | 0 | Success. |
-| 1 | Failure, or `create` finished with warnings: unreadable files were left out, or a file changed size while being read. The backup and index are still valid. |
+| 1 | Failure, or `create` finished with warnings: it left out unreadable files, or a file changed size while bu read it. The backup and index are still valid. |
 | 2 | Usage error. |
 
 ## Performance
@@ -231,8 +282,8 @@ Details and per-primitive numbers:
 | SQLite increment, 26 MB database, 2% of rows rewritten at random | 0.99 × changed pages |
 
 The 1% scattered change costs ~3.6× the bytes changed, because each 4 KiB
-write dirties one or two ~20 KiB chunks; that is the price of CDC's chunk size,
-and why SQLite databases get page-sized chunks.
+write dirties one or two ~20 KiB chunks. CDC's chunk size sets that price,
+and it is why SQLite databases get page-sized chunks.
 
 ## Security
 
@@ -242,51 +293,52 @@ file and a passphrase.
 
 - **Encrypted:** file contents, file names, the directory tree, file sizes,
   timestamps, owners, modes and symlink targets, and which chunks backups
-  share (chunk IDs are keyed and kept inside encrypted records).
-- **Authenticated:** every record (AES-256-GCM), and every chunk is re-hashed
-  against its ID on read. Tampering makes `check` and `restore` fail loudly; a
-  withheld file is reported as an incomplete chain.
+  share (chunk IDs are keyed and sit inside encrypted records).
+- **Authenticated:** every record (AES-256-GCM), and bu re-hashes every chunk
+  against its ID on read. Tampering makes `check` and `restore` fail with an
+  error; bu reports a withheld file as an incomplete chain.
 - **Not hidden:** that these are bu files, the format version, the total size
-  of each backup and the length of each chunk record (roughly the compressed
-  chunk size), and so how much changed between increments. The sequence of
-  chunk lengths of a large file can be used to test whether a backup contains
-  a *known* file; bu does not pad records.
+  of each backup and the length of each chunk record (about the compressed
+  chunk size), and from those, how much changed between increments. Someone
+  holding a *known* file can use the sequence of its chunk lengths to test
+  whether a backup contains it; bu does not pad records.
 - **Not detected:** rollback to an older but valid chain. Keep the index, or
   a list of the expected files, somewhere an attacker cannot write.
 
-**Key handling.** It works like LUKS:
+**Key handling.** bu handles keys the way LUKS does:
 
 - **The master key is random.** `bu key init` draws 32 bytes from the
-  kernel. Nobody types it or sees it, and every backup is encrypted under
-  keys derived from it.
-- **The passphrase only unlocks it.** The key file stores the master key
-  wrapped in up to eight slots, each sealed under a key that Argon2id
-  derives from one passphrase. A stolen key file still needs a passphrase,
-  and each guess costs an Argon2id run (by default ~1 GiB and ~2 s).
+  kernel. You never type or see it, and bu encrypts each backup under keys
+  derived from it.
+- **The passphrase unlocks the master key and does nothing else.** The key
+  file stores the master key wrapped in up to eight slots, each sealed under
+  a key that Argon2id derives from one passphrase. A thief with the key file
+  still needs a passphrase, and pays an Argon2id run (by default ~1 GiB and
+  ~2 s) for each guess.
 - **Changing a passphrase re-encrypts nothing.** `key passwd`, `add` and
-  `remove` rewrite a 944-byte file; every backup, old and new, opens with any
+  `remove` rewrite a 944-byte file; each backup, old and new, opens with any
   current passphrase.
-- **The key file is as necessary as the passphrase.** Lose every copy of it
+- **You need the key file as much as the passphrase.** Lose every copy of it
   and the backups are unreadable, passphrase or not. Keep a copy somewhere
-  other than the backups, as you would keep a LUKS header backup. A copy
-  made earlier keeps the passphrases it had: removing one from your working
-  file does not remove it from the copy.
+  other than the backups, as you would keep a LUKS header backup. A copy you
+  made earlier keeps the passphrases it had: removing a passphrase from your
+  working file leaves it in the copy.
 
 bu warns when other users can read the key file. Use one key per data set if
 files from two chains must not be substitutable for each other.
 
-bu does not roll its own primitives: BLAKE3, AES-256-GCM (libsodium) and LZ4
-are vendored verbatim from upstream, and every composition is documented in
+bu does not roll its own primitives. BLAKE3, AES-256-GCM and Argon2id
+(libsodium) and LZ4 come verbatim from upstream, and
 [docs/design.md §3](docs/design.md#3-cryptography) and
-[§11](docs/design.md#11-threat-model).
+[§11](docs/design.md#11-threat-model) document each composition.
 
 ## Limitations
 
-Deliberately not supported (see
+bu does not support (see
 [docs/design.md §12](docs/design.md#12-deliberate-omissions)):
 
 - Hard links (restored as separate files), extended attributes, ACLs and file
-  flags. Device files, FIFOs and sockets are skipped with a warning.
+  flags. bu skips device files, FIFOs and sockets with a warning.
 - Exclude patterns and a one-file-system switch: back up what you name; the
   walk descends into mounted filesystems.
 - More than one snapshot per backup file, and pruning other than by merging.
@@ -294,17 +346,17 @@ Deliberately not supported (see
 - More than ~140 million new chunks (~2.8 TB of unique data) in one backup
   file; split larger first backups by directory.
 - Platforms other than Linux x86-64, and CPUs without AES-NI, PCLMULQDQ and
-  AVX (every x86-64 since ~2011 has them; bu names the missing feature).
+  AVX (x86-64 CPUs since ~2011 have them; bu names the missing feature).
 
-Chunks referenced only by older snapshots are forgotten: a file that is
-deleted and reappears two increments later is stored again. That is what
-keeps the index the size of one snapshot and makes merge safe.
+bu forgets chunks that only older snapshots reference: if you delete a file
+and it reappears two increments later, bu stores it again. That keeps the
+index the size of one snapshot and makes merge safe.
 
 ## Building and testing
 
-Needs clang (with lld), CMake ≥ 3.20 and Ninja. The libraries (BLAKE3, LZ4,
-and libsodium's AES-GCM and Argon2id) are vendored in `third_party/`; the binary links
-only against glibc.
+You need clang (with lld), CMake ≥ 3.20 and Ninja. The libraries (BLAKE3,
+LZ4, and libsodium's AES-GCM and Argon2id) are vendored in `third_party/`;
+the binary links against glibc and nothing else.
 
 ```sh
 scripts/build.sh                 # Release build; prints the build directory, bu is in it
@@ -316,16 +368,15 @@ scripts/bench.sh                 # throughput and increment sizes
 ```
 
 The build directory lives outside the tree, in
-`~/.cache/bu-build-<config>-<hash>` (or under `$BU_BUILD_ROOT`). There is no
+`~/.cache/bu-build-<config>-<hash>` (or under `$BU_BUILD_ROOT`). bu has no
 install step: copy `bu` wherever you like. The integration tests generate
-test data with `openssl`; the SQLite test is skipped without the `sqlite3`
-CLI.
+test data with `openssl` and skip the SQLite test without the `sqlite3` CLI.
 
 ## Documentation
 
-- [docs/design.md](docs/design.md): chunking, crypto, the key file and the nonce scheme,
-  manifests, the files cache, merge semantics, the threat model, performance
-  and size.
+- [docs/design.md](docs/design.md): chunking, crypto, the key file and the
+  nonce scheme, manifests, the files cache, merge semantics, the threat
+  model, performance and size.
 - [docs/format.md](docs/format.md): the file format, byte by byte.
 - [CHANGELOG.md](CHANGELOG.md)
 
