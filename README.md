@@ -1,5 +1,7 @@
 # bu (backup utility)
 
+[![CI](https://github.com/Squareys/bu/actions/workflows/ci.yml/badge.svg)](https://github.com/Squareys/bu/actions/workflows/ci.yml)
+
 **Encrypted, deduplicating, incremental backups as a Unix filter.**
 
 bu is a lightweight take on what BorgBackup does, in one small native binary
@@ -358,6 +360,7 @@ the binary links against glibc and nothing else.
 scripts/build.sh                 # Release build; prints the build directory, bu is in it
 scripts/build.sh Debug --asan    # also: Debug, --asan (ASan + UBSan), --tsan
 scripts/test.sh                  # unit and integration tests
+scripts/test.sh --smoke          # smoke tests: unit tests and the quick end-to-end scripts
 scripts/test.sh --asan           # the same against a sanitizer build (or --tsan)
 scripts/size_report.sh           # stripped size and a per-component breakdown
 scripts/bench.sh                 # throughput and increment sizes (tmpfs)
@@ -368,6 +371,9 @@ The build directory lives outside the tree, in
 `~/.cache/bu-build-<config>-<hash>` (or under `$BU_BUILD_ROOT`). bu has no
 install step: copy `bu` wherever you like. The integration tests generate
 test data with `openssl` and skip the SQLite test without the `sqlite3` CLI.
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs the smoke tests and
+the size report on a Release build, the full suite, and the full suite
+under `--asan` and `--tsan`.
 
 ## Documentation
 

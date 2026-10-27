@@ -9,7 +9,7 @@ disk.
 
 ```
 scripts/build.sh [Debug|Release] [--asan|--tsan]   # prints the build dir
-scripts/test.sh [--asan|--tsan] [FILTER]           # unit + integration tests
+scripts/test.sh [--asan|--tsan] [--smoke] [FILTER] # unit + integration tests
 scripts/size_report.sh                             # stripped size + breakdown
 scripts/bench.sh [--size-mb N] [--dir DIR]         # throughput, increments
 ```
@@ -98,6 +98,10 @@ configuration.
 - Unit tests: `BK_TEST(snake_case_name)` in `tests/test_*.cpp`, `BK_CHECK`,
   `BK_REQUIRE`, `BK_CHECK_EQ`, `BK_CHECK_HEX`. Each file opens with a comment
   naming what it guards. Known-answer vectors for every primitive.
+- Smoke tests (`scripts/test.sh --smoke`): the unit tests and the quick
+  integration scripts listed in `SMOKE` in `scripts/test.sh`. CI
+  (`.github/workflows/ci.yml`) runs them on the Release build, then the full
+  suite plain, under `--asan` and under `--tsan`.
 - Integration tests: `tests/integration/NN-name.sh`, sourcing `lib.sh`,
   driving the real binary in a temp dir. Assert byte bounds on increments,
   content and metadata on restores, loud failure on tampering.

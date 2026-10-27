@@ -1,0 +1,96 @@
+# CI: a Release build with the smoke tests and the size report, the full
+# end-to-end suite, and the full suite again under ASan + UBSan and TSan.
+#
+# Every job runs the same scripts a developer runs locally (see CLAUDE.md),
+# so a CI failure reproduces with the command line shown in the failing step.
+#
+# Test coverage per job:
+#   build  scripts/test.sh --smoke: unit tests + the quick end-to-end scripts
+#          (01-incremental, 02-chain-merge, 03-tamper, 06-cli, 11-list-escape).
+#   e2e    scripts/test.sh: unit tests + every script in tests/integration.
+#   asan,  scripts/test.sh --asan / --tsan: the full suite too. It takes well
+#   tsan   under a minute per sanitizer locally, so there is nothing to gain
+#          from a subset.
+#
+# Nothing is excluded:
+#   - 08-large-sparse makes a 5 GiB *sparse* file; it allocates a few KB on
+#     the runner's ext4 /tmp and runs in seconds.
+#   - The Argon2id RLIMIT_AS unit test (test_keyfile.cpp) runs in the Release
+#     builds; under the sanitizers it skips itself, since they reserve
+#     terabytes of address space up front.
+#   - The terminal tests in 06-cli and 09-key use script(1), which brings its
+#     own pseudo-terminal, so they work without a TTY on the runner.
+#   - The runner user is not root, so 07-unreadable runs (it skips as root)
+#     and 10-restore-target checks the non-root set-uid stripping.
+#   - 13-create-no-hang needs taskset and 4 CPUs; the standard runner has 4.
+#     It is a regression test for a hang, so it runs in e2e and under both
+#     sanitizers, not in the smoke tests (40 creates). Each create in it has
+#     its own 20 s timeout, and every job has a timeout-minutes a few times
+#     its normal run time, so a hang fails the job instead of idling for the
+#     default six hours.
+#
+# No build cache: a cold build takes seconds, less than restoring a cache.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and smoke tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Release build
+        run: scripts/build.sh Release
+      - name: Smoke tests
+        run: scripts/test.sh --smoke
+      - name: Size report
+        run: scripts/size_report.sh
+
+  e2e:
+    name: End-to-end tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Unit and integration tests
+        run: scripts/test.sh
+
+  asan:
+    name: ASan + UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      # Sanitizer runtimes of the clang shipped with Ubuntu 24.04 fail with
+      # "unexpected memory mapping" under the 32 bits of mmap randomisation
+      # that recent kernels default to; 28 bits is what they expect.
+      - name: Lower mmap randomisation for the sanitizers
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Unit and integration tests (ASan + UBSan)
+        run: scripts/test.sh --asan
+
+  tsan:
+    name: TSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Lower mmap randomisation for the sanitizers
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Unit and integration tests (TSan)
+        run: scripts/test.sh --tsan

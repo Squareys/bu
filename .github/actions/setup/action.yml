@@ -1,0 +1,45 @@
+# Shared job setup: show the CPU features bu needs, then install the toolchain
+# and the tools the integration tests call. Runs after actions/checkout.
+name: Set up the bu toolchain
+description: Print the CPU flags bu needs at runtime and install clang, lld, CMake, Ninja and the test tools.
+runs:
+  using: composite
+  steps:
+    # bu requires AES-NI, PCLMUL and AVX at runtime (BLAKE3 also uses SSE4.1,
+    # AVX2 and AVX-512 when present). GitHub-hosted x86-64 runners have them;
+    # if a runner does not, this step says so instead of a test failing later
+    # with a less obvious message.
+    - name: CPU features
+      shell: bash
+      run: |
+        grep -m1 '^model name' /proc/cpuinfo || true
+        echo "cores: $(nproc)"
+        flags=" $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2) "
+        missing=""
+        for f in aes pclmulqdq avx sse4_1 avx2 avx512f; do
+            if [[ "$flags" == *" $f "* ]]; then echo "  $f: yes"; else echo "  $f: no"; fi
+        done
+        for f in aes pclmulqdq avx; do
+            [[ "$flags" == *" $f "* ]] || missing="$missing $f"
+        done
+        if [ -n "$missing" ]; then
+            echo "::error::this runner's CPU lacks$missing, which bu requires at runtime"
+            exit 1
+        fi
+
+    # libclang-rt-dev holds the sanitizer runtimes (clang only recommends it,
+    # so --no-install-recommends would leave it out). openssl generates the
+    # test data, sqlite3 drives 04-sqlite, script(1) (bsdutils) gives 06-cli
+    # and 09-key a terminal, util-linux has setsid and taskset (13-create-
+    # no-hang), procps has pgrep and ps (09-key's Ctrl-Z test).
+    # size_report.sh needs gawk (strtonum): Ubuntu's default awk is mawk, and
+    # installing gawk makes it the awk alternative.
+    - name: Install packages
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q --no-install-recommends \
+            clang lld cmake ninja-build openssl sqlite3 bsdutils util-linux procps gawk \
+            libclang-rt-dev
+        clang --version | head -1
+        cmake --version | head -1

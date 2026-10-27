@@ -31,7 +31,8 @@ sqlite3 src/app.db "UPDATE t SET v = upper(v) WHERE id IN (SELECT id FROM t ORDE
 
 "$BU" create --key key --passphrase-file pass --base idx --index-out idx src > inc.bk
 INC=$(size_of inc.bk)
-CHANGED=$(cmp -l before.db src/app.db | awk '{ p[int(($1 - 1) / 4096)] = 1 } END { print length(p) }')
+# cmp exits 1 because the files differ: expected, not a failure (pipefail).
+CHANGED=$({ cmp -l before.db src/app.db || true; } | awk '{ p[int(($1 - 1) / 4096)] = 1 } END { print length(p) }')
 IDEAL=$((CHANGED * 4096))
 RATIO=$(awk -v a="$INC" -v b="$IDEAL" 'BEGIN { printf "%.3f", a / b }')
 note "changed pages: $CHANGED ($IDEAL bytes); increment: $INC bytes; ratio $RATIO"
