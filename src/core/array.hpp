@@ -61,7 +61,6 @@ struct Array {
 
     void reserve(u32 newCap) {
         if (newCap <= cap) return;
-        // Round up to reduce reallocations; start at 8.
         u32 c = cap ? cap * 2 : 8;
         if (c < newCap) c = newCap;
         // Fast path: a trivially-relocatable T in an allocator that can realloc
