@@ -319,6 +319,6 @@ describes, and is refused by the other mode.
 A reader refuses any version it does not know (the key file, and the
 segment header, table, manifest and index bodies each carry one). Any
 change to the derivation contexts, the nonce layout, the associated data or
-a record body is a new format version. Format 1 (bu 0.1.0: one backup per
-file, a footer instead of a trailer, no record headers) is refused by its
-version.
+a record body is a new format version. Format 1 (development builds before
+0.1.0: one backup per file, a footer instead of a trailer, no record
+headers) is refused by its version.

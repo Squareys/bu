@@ -103,9 +103,9 @@ wakes once per MiB instead of per 64 KiB.
 
 ### Rejected
 
-- *A separate index file next to every chain* (bu 0.1.0's model): two files
-  that must stay in step, and the index lived on the machine making the
-  backups. The chain's tail holds the same information; the index stays for
+- *A separate index file next to every chain* (pre-release format 1): two
+  files that must stay in step, and the index lived on the machine making
+  the backups. The chain's tail holds the same information; the index stays for
   pipes and object stores.
 - *tar as the container*: tar has no index (a reader scans every member
   header to find anything), cannot authenticate its structure, and its
@@ -260,7 +260,7 @@ bound to its ID by content: a reader recomputes the keyed hash of every
 decoded chunk and compares it with the ID it was looking for (the table's,
 or, streaming, the one the snapshot wants), which is what makes it safe for
 `merge` and `restore` to take a chunk by ID from whichever segment has it.
-(bu 0.1.0 also put the ID in the associated data; a stream reader does not
+(Pre-release format 1 also put the ID in the associated data; a stream reader does not
 know it before decrypting, and the hash check binds it anyway.)
 
 The **header check** (keyed BLAKE3 of the header under a salt-derived key)
@@ -503,9 +503,9 @@ deliberate: it is what makes merge safe (§7) and keeps the index the size of
 one snapshot.
 
 `bu index` writes the index of a chain's latest snapshot; because manifests
-carry dev/ino/ctime too, it has the files cache intact. bu 0.1.0's index
-also had a table of which backup file held each chunk; nothing used it,
-and it is gone.
+carry dev/ino/ctime too, it has the files cache intact. The index of
+pre-release format 1 also had a table of which backup file held each
+chunk; nothing used it, and it is gone.
 
 ## 7. Merge
 
