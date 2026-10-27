@@ -71,10 +71,11 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # The lines between "## [X.Y.Z]" and the next "## [" heading.
+          # The lines between "## [X.Y.Z]" and the next "## [" heading or
+          # the link references at the end.
           awk -v v="$VERSION" '
               index($0, "## [" v "]") == 1 { on = 1; next }
-              on && /^## \[/ { exit }
+              on && /^(## )?\[[^]]*\]/ { exit }
               on { print }
           ' CHANGELOG.md > notes.md
           if [ ! -s notes.md ]; then
