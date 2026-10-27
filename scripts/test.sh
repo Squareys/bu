@@ -30,7 +30,13 @@ done
 for s in $SMOKE; do   # a renamed script must not silently drop out of the smoke tests
     [ -f "tests/integration/$s.sh" ] || { echo "test.sh: smoke test '$s' does not exist" >&2; exit 2; }
 done
-BUILD_DIR="$(scripts/build.sh $ASAN | tail -1)"
+# build.sh prints the build directory last; on failure show the compiler output.
+if ! BUILD_LOG="$(scripts/build.sh $ASAN 2>&1)"; then
+    printf '%s\n' "$BUILD_LOG" >&2
+    echo "test.sh: build failed" >&2
+    exit 1
+fi
+BUILD_DIR="$(printf '%s\n' "$BUILD_LOG" | tail -1)"
 export BU="$BUILD_DIR/bu"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
 export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:second_deadlock_stack=1}"
