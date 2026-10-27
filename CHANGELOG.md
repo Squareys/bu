@@ -7,191 +7,58 @@ own version number (docs/format.md); a release that changes it says so.
 
 ## [Unreleased]
 
-### Changed
-- **Chain files; format version 2.** A full backup and its increments live
-  in one file, the chain, as self-contained segments laid end to end, each
-  ending in a 64-byte authenticated trailer (segment length, where its
-  manifest and chunk table are, generation, check value, magic). Offsets
-  are relative to each segment, so `cat a.bu b.bu` of segments written
-  separately is a valid chain. Format 1 files are refused by version.
-- **Path-first CLI.** `bu create (--key KEY | --no-key) CHAIN PATH...`
-  writes a full backup into a new chain and appends an increment to an
-  existing one, reading the base (dedupe set, delta base, files cache)
-  from the chain's tail; no index file is needed. `restore`, `check`,
-  `list`, `index` take `CHAIN...` (a chain file, or its segments as
-  separate files, in order); `restore` takes the paths to restore after
-  `--` (replacing `--path`); `merge` writes to `-o OUT` (or stdout), and
-  `-o` naming the input compacts a chain in place.
-- `-` is stdin or stdout. A regular file there is used like a path
-  (`bu create ... - src >> chain.bu` appends); a pipe is streamed. `create`
-  to a pipe takes its base from `--base INDEX` and writes the next with
-  `--index-out INDEX`; the index is otherwise optional. `check` and `list`
-  read a chain from a pipe in one pass; `restore` does too, with
-  `--index`, writing each chunk as it streams past. Pipes get a 1 MiB
-  buffer (`F_SETPIPE_SZ`).
-- `create` on a chain file takes an exclusive lock (failing at once when
-  another bu holds it), appends with `O_APPEND`, fsyncs, and truncates the
-  file back on any failure, including SIGINT, SIGTERM and SIGHUP. After a
-  SIGKILL or a crash, readers skip the partial last segment (and say so;
-  `check` fails), and the next `create` removes it.
-- Every record starts with a sealed record header (its type and body
-  nonce, under a nonce counted from the record's position), so a reader
-  streaming the chain can open the chunks before the table arrives without
-  the sequence numbers' gaps being visible. A body's associated data is
-  its type; the content hash binds the chunk ID.
-- Manifests carry each chunk's size, and `create` writes a self-contained
-  manifest instead of a delta when the deltas since the last one would
-  outweigh it, so resolving the latest snapshot reads at most about twice
-  a full manifest however long the chain.
-- Restore sorts each batch's chunks by their place in the chain and reads
-  them in spans that may skip up to 64 KiB of unneeded records; a chunk
-  used several times in a span is decoded once. Merge reads in spans too
-  (it read one record per pread).
-- The index file holds the latest snapshot and two checkpoint counters;
-  the advisory chunk-location table is gone. `bu index` writes one from a
-  chain (from a pipe too).
+## [0.1.0] - 2026-10-27
+
+Initial release. Chain file format version 2, key file format version 2.
 
 ### Added
-- `--no-key`: unencrypted chains. Chunk IDs are unkeyed BLAKE3, payloads
-  are stored in the clear, and every tag is a BLAKE3 checksum (a chunk's
-  is its ID): damage is detected, tampering is not. Readers learn the mode
-  from the header; `--key` on an unencrypted chain, `--no-key` on an
-  encrypted one, and chains mixing both are refused. `create` requires one
-  of `--key` and `--no-key`.
-- Integration tests 14 (cat-joined segments, stdin seek mode, stream
-  check/list/restore, partial restore, create to stdout), 15 (write
-  error, SIGTERM and SIGKILL mid-append, an interrupted first backup),
-  16 (`--no-key`) and 17 (lock contention).
+- **Chain files.** `bu create (--key KEY | --no-key) CHAIN PATH...` writes
+  a full backup into a new chain and appends an increment to an existing
+  one. Each backup is a self-contained segment with an authenticated
+  trailer; offsets are relative to the segment, so segments written to
+  separate files and joined with `cat` form a valid chain.
+- **Encryption and authentication.** AES-256-GCM under a fresh key per
+  segment, keyed-BLAKE3 chunk IDs, and encrypted file names, sizes,
+  timestamps and directory tree. Every record is authenticated and every
+  restored chunk re-hashed.
+- **Key files with passphrase slots.** `bu key init` draws a random master
+  key and stores it only wrapped in up to eight slots, each sealed under a
+  key Argon2id derives from a passphrase (calibrated to about 2 s per
+  unlock). `bu key add`, `passwd`, `remove` and `info` manage the slots.
+  Passphrases come from the terminal, `--passphrase-file` or
+  `--passphrase-fd`.
+- **Unencrypted chains** with `--no-key`: payloads in the clear, BLAKE3
+  checksums detect damage (not tampering).
+- **Deduplication and compression.** FastCDC content-defined chunking
+  (~20 KiB average), page-sized chunks for SQLite databases, LZ4.
+- **Increments from the chain itself.** An increment stores the chunks
+  the latest snapshot lacks and skips reading files whose metadata is
+  unchanged (files cache; `--no-files-cache` reads everything). Manifests
+  are coded as deltas against their parent, with a full manifest written
+  whenever the deltas would outweigh it.
+- **Safe appends.** `create` locks the chain, appends, fsyncs, and
+  truncates the file back on failure or SIGINT/SIGTERM/SIGHUP. After a
+  crash, readers skip the partial last segment and the next `create`
+  removes it.
+- `restore` of the latest snapshot or of selected paths (`-- PATH...`),
+  with safe path resolution (`O_NOFOLLOW` from the target directory),
+  sparse output for zero chunks, and set-uid/set-gid bits only when run as
+  root.
+- `merge` collapses a chain into one full segment (in place with `-o`
+  naming the input); later increments keep working with it.
+- `check`, `list` (control bytes in names escaped) and `index`.
+- **Pipes.** `-` is stdin or stdout. `create` streams a segment to a pipe
+  with its base from `--base INDEX`; `check`, `list` and `restore` (with
+  `--index`) read a chain from a pipe in one pass.
+- **Parallel pipeline.** Up to eight reader threads, a chunker, `-j N`
+  workers and an in-order writer for `create`, with output that does not
+  depend on thread scheduling; parallel `restore`, `check` and `merge`
+  reading the chain in large sorted spans.
+- One small Linux x86-64 binary (about 270 KB stripped), requiring AES-NI,
+  PCLMULQDQ and AVX.
+- Known-answer tests for every primitive, unit and integration tests,
+  ASan/UBSan and TSan runs, benchmarks (`scripts/bench.sh`,
+  `scripts/bench_io.sh`).
 
-### Fixed
-- Error messages that wrapped another message with a file name
-  (`errSet(err, path, ": ", err.view())`) could garble it: the parts were
-  appended into the string they were read from.
-- `bu check` started its threads before asking for the passphrase, so a
-  Ctrl-Z at the prompt reached a thread that did not hold it back.
-
-
-### Security
-- The key file and the index are replaced through a temp file with a random
-  name, created with `O_EXCL | O_NOFOLLOW` and mode 0600, and the directory
-  is fsynced after the rename. The old temp name (`PATH.tmp.PID`) was
-  predictable and opened with `O_TRUNC`: anyone who could write in the
-  directory could plant a symlink there and have bu (as root: any file)
-  overwrite its target, or keep a world-readable copy of the wrapped key.
-- `bu key add`, `passwd` and `remove` refuse a key path that is a symlink or
-  has other hard links, before asking for a passphrase. The rename replaced
-  the link, not the file behind it, so the real file kept a removed
-  passphrase's slot.
-- `bu restore` unlinks a name already in the target and creates the file
-  with `O_EXCL` instead of opening it with `O_TRUNC`: a planted hard link is
-  no longer written through, and a planted FIFO no longer hangs the restore.
-  Directory modes are set through an `O_NOFOLLOW` descriptor, so a directory
-  swapped for a symlink cannot redirect the chmod.
-- `bu restore` restores set-uid and set-gid bits on files only when run as
-  root, as GNU tar does.
-- `bu list` escapes control bytes in names and symlink targets (`\n`,
-  `\xHH`, `\\`): a file name could send escape sequences to the terminal.
-- A key slot whose Argon2id memory cannot be allocated is skipped with a
-  warning and the other slots are tried, instead of ending the unlock.
-- A passphrase file that group or others can access is warned about, and
-  `bu key info` now warns about such a key file, as the other commands did.
-- Slots below RFC 9106's KDF recommendations (64 MiB / 3 passes, or 2 GiB /
-  1 pass) are warned about when written and marked "(weak)" by `key info`.
-- Ctrl-Z at the passphrase prompt no longer stops bu with terminal echo off;
-  it takes effect once the terminal is restored.
-- LZ4 payloads above its ~2 GiB `int` limit are stored and refused on read,
-  instead of reaching LZ4 as wrapped sizes.
-- Per-container keys of a backup being written are wiped on destruction.
-- docs/design.md: no locking for concurrent `bu key` commands; removing a
-  passphrase does not revoke it for someone holding an older copy of the
-  key file (only a new key does); the worker threads share one key schedule
-  per container (not one per thread).
-- Binary size 231 232 → 234 344 bytes; chain files took it from 238 808
-  to 273 272 bytes.
-
-### Fixed
-- `bu create` could hang forever at the end of the file list: readers
-  waiting for a free read slot were woken one at a time and not at all when
-  the last range was claimed, and the chunker waits for every reader to
-  exit. Seen in about 2% of runs with 4 readers on a few CPUs, 7% with 8.
-
-### Performance
-- `bu restore` and `bu check` read the backup in spans of consecutive
-  records (about 256 KiB per `pread`) and prefetch about 16 MiB ahead,
-  instead of one ~20 KiB record per `pread`. From a cold NVMe, `check` of a
-  1.2 GB backup takes 0.42 s instead of 0.97 s, faster than one sequential
-  read of the file (docs/benchmarks.md).
-- `bu restore` writes runs of decoded chunks of one file with one `pwrite`,
-  creates the next batch's files while the current batch is written, and
-  defaults to 8 threads (`-j` still overrides): 1.45 s instead of 2.05 s
-  for 1.5 GiB from and to the same NVMe, at less than half the CPU.
-- `bu create` runs up to 8 reader threads (was 4) and a 16 MiB read ring
-  (was 12 MiB), and without `-j` it runs the CPUs less three quarters of
-  the readers as workers (14 on 20 CPUs, was 20) so the readers do not
-  oversubscribe the machine: a full backup from an NVMe to the same disk
-  takes 1.69 s instead of 2.01 s (to tmpfs: 0.80 s instead of 1.31 s);
-  from tmpfs it is as fast as before.
-
-### Changed
-- `scripts/bench_io.sh` sets up its key with `bu key init` (it called a
-  `keygen` command that no longer exists), adds increments with 1% of the
-  files changed, and prints every run as a multiple of the time to read
-  every file once. docs/benchmarks.md has before/after numbers for this
-  release and the README's performance section is rewritten around them.
-- **Key file format 2: a random master key in passphrase keyslots (the LUKS
-  design).** `bu key init KEYFILE` draws the 32-byte master key from
-  getrandom and stores it only wrapped in one of eight slots, each sealed
-  with AES-256-GCM under a key Argon2id stretches from a passphrase (memory
-  min(1 GiB, RAM/4), passes calibrated to ~2 s per unlock; `--kdf-memory`,
-  `--kdf-time`, `--kdf-target-ms`). `bu key add`, `passwd`, `remove`
-  (`--slot N`; the last usable slot is refused) and `info` manage the slots.
-  Every command that takes `--key` now asks for the passphrase on the
-  terminal (echo off), or reads it from `--passphrase-file PATH` or
-  `--passphrase-fd N` for unattended runs. The backup and index format is
-  unchanged: everything is still derived from the master key.
-- `bu keygen` and the plaintext `bu-key-1` key file are gone; such a file is
-  refused with a message naming the format.
-- A damaged key slot is reported as damaged and skipped; a wrong passphrase
-  as a wrong passphrase.
-- Renamed the project from backu to bu: binary, help text, message prefixes,
-  key-file prefix (`bu-key-1`), build directory and environment variables
-  (`BU_BUILD_ROOT`). The file magic (`BUBAK\r\n^Z`) and the BLAKE3
-  `derive_key` contexts now name bu, so files and keys made before the rename
-  are not readable; the format version stays 1 (no backups existed yet).
-- Binary size 174 768 → 231 216 bytes (Argon2id and BLAKE2b from libsodium
-  1.0.22, the key file and the `bu key` commands).
-- Licensing spelled out in the README: bu is MIT (`LICENSE`); vendored BLAKE3
-  (CC0-1.0 / Apache-2.0), LZ4 (BSD-2-Clause) and libsodium (ISC) keep their
-  own licences.
-
-## [0.1.0] — 2026-10-25
-
-First release. File format version 1.
-
-### Added
-- `create`: deduplicated, LZ4-compressed, AES-256-GCM-encrypted backups
-  streamed to stdout; increments from a small index (`--base`,
-  `--index-out`), never from the previous backup.
-- Files cache: unchanged files (dev, inode, size, mtime, ctime) are not read
-  at all on an increment; `--no-files-cache` to read everything.
-- FastCDC content-defined chunking (min 4 KiB, ~20 KiB average, max 64 KiB),
-  and page-aligned chunking for SQLite databases detected by their header.
-- Delta manifests: an increment's file tree is coded against its parent, so
-  unchanged files and unchanged parts of large files cost a few bytes.
-- `restore` (latest snapshot of a chain, `-C DIR`, `--path PREFIX`), with
-  every chunk authenticated and re-hashed, safe path resolution, sparse
-  output for zero chunks.
-- `merge`: one self-contained file from a chain; later increments keep
-  working with it.
-- `check`, `list` (backups or an index), `index` (rebuild a lost index,
-  files cache included), `keygen`.
-- Parallel create pipeline (readers, chunker, `-j N` workers, ordered
-  writer) with output independent of thread scheduling; parallel restore,
-  check and merge.
-- Robustness: files that change size while being read are stored as walked
-  and reported; unreadable files are left out and reported (exit 1, backup
-  still valid); a backup never contains its own output file; an unwritable
-  index location is refused before reading; a key file readable by others
-  is reported.
-- Known-answer tests for BLAKE3 and AES-256-GCM, unit and integration tests,
-  ASan/UBSan and TSan builds, benchmarks (`scripts/bench.sh`).
+[Unreleased]: https://github.com/Squareys/bu/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Squareys/bu/releases/tag/v0.1.0

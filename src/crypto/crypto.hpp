@@ -3,7 +3,7 @@
 //
 // Everything above this layer speaks in fixed-size byte arrays and never sees
 // blake3.h or a libsodium header: those are confined to crypto.cpp (hard rule
-// in CLAUDE.md), so swapping an implementation is a one-file change and the
+// in CONTRIBUTING.md), so swapping an implementation is a one-file change and the
 // rest of the tree cannot grow a second, subtly different call into either.
 //
 // docs/design.md §Crypto is the argument for the choices; in one paragraph:

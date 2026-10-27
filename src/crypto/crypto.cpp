@@ -2,7 +2,7 @@
 // and Argon2id.
 //
 // The ONLY translation unit that includes blake3.h or a libsodium header
-// (CLAUDE.md hard rule 4). It adds no cryptography of its own: each function
+// (CONTRIBUTING.md hard rule 4). It adds no cryptography of its own: each function
 // is a call into upstream code plus the argument shaping our fixed-size types
 // need. The known-answer tests in tests/test_crypto.cpp run through these
 // wrappers, not around them, so the vectors cover the shaping too.

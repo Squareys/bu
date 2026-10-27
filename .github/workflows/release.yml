@@ -1,0 +1,95 @@
+# Release: on a pushed tag vX.Y.Z, build the Release binary on the same
+# runner and toolchain as CI (.github/actions/setup), run the smoke tests
+# against it, and publish a GitHub release with
+#
+#   bu-X.Y.Z-linux-x86_64          the stripped binary
+#   bu-X.Y.Z-linux-x86_64.sha256   its checksum, in `sha256sum -c` format
+#   THIRD_PARTY_NOTICES            licences of the vendored code in the binary
+#
+# The tag must match the version in CMakeLists.txt (`bu --version` prints
+# that one), so a release cannot carry a binary that names another version.
+# The release notes are the tag's section of CHANGELOG.md.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+
+      - name: Version from the tag
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cmake_version="$(sed -n 's/^project(bu VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          if [ "$version" != "$cmake_version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match CMakeLists.txt version $cmake_version"
+              exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Release build
+        run: scripts/build.sh Release
+
+      - name: Smoke tests
+        run: scripts/test.sh --smoke
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          build_dir="$(scripts/build.sh Release --print-build-dir)"
+          name="bu-${VERSION}-linux-x86_64"
+          mkdir dist
+          cp "$build_dir/bu" "dist/$name"
+          strip "dist/$name"
+          [ "$("dist/$name" --version)" = "bu $VERSION" ] || { echo "::error::binary reports '$("dist/$name" --version)'"; exit 1; }
+          (cd dist && sha256sum "$name" > "$name.sha256")
+          cp THIRD_PARTY_NOTICES dist/
+          ls -l dist
+          cat "dist/$name.sha256"
+
+      - name: Release notes from CHANGELOG.md
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # The lines between "## [X.Y.Z]" and the next "## [" heading or
+          # the link references at the end.
+          awk -v v="$VERSION" '
+              index($0, "## [" v "]") == 1 { on = 1; next }
+              on && /^(## )?\[[^]]*\]/ { exit }
+              on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+              echo "::error::CHANGELOG.md has no section for $VERSION"
+              exit 1
+          fi
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          name: bu ${{ steps.version.outputs.version }}
+          body_path: notes.md
+          files: |
+            dist/bu-${{ steps.version.outputs.version }}-linux-x86_64
+            dist/bu-${{ steps.version.outputs.version }}-linux-x86_64.sha256
+            dist/THIRD_PARTY_NOTICES
+          fail_on_unmatched_files: true

@@ -1,6 +1,6 @@
 // args.hpp — command-line parsing shared by every subcommand.
 //
-// The rules (CLAUDE.md): an unknown flag, a repeated flag, a flag missing its
+// The rules (CONTRIBUTING.md): an unknown flag, a repeated flag, a flag missing its
 // value and an out-of-range number are each refused BY NAME with exit status
 // 2; nothing is guessed, clamped or silently ignored. A backup tool that
 // misreads `--bsae` as a path and makes a full backup instead of an increment

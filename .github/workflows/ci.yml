@@ -1,7 +1,7 @@
 # CI: a Release build with the smoke tests and the size report, the full
 # end-to-end suite, and the full suite again under ASan + UBSan and TSan.
 #
-# Every job runs the same scripts a developer runs locally (see CLAUDE.md),
+# Every job runs the same scripts a developer runs locally (see CONTRIBUTING.md),
 # so a CI failure reproduces with the command line shown in the failing step.
 #
 # Test coverage per job:
