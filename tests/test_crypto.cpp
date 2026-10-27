@@ -8,6 +8,11 @@
 // path: below one block, exactly one 1 KiB chunk, one past it, and 100 KiB,
 // which runs the widest SIMD variant the CPU has (AVX-512, AVX2 or SSE4.1).
 //
+// Argon2id: two of libsodium's own vectors (test/default/pwhash_argon2id.c,
+// tv cases 4 and 6, outputs from its .exp file), through kdfArgon2id, so the
+// memory-cost conversion (KiB here, bytes in libsodium) is covered too. They
+// run on whichever fill-block kernel this CPU dispatches to.
+//
 // AES-256-GCM: test cases 13-16 of McGrew & Viega's GCM specification (the
 // NIST-submitted vectors), plus tags for longer messages computed with OpenSSL
 // by tests/tools/gcm_reference.py, because the official vectors never reach
@@ -207,4 +212,42 @@ BK_TEST(hex_decode_refuses_bad_input) {
     BK_CHECK(hexDecode("0aFf"_s, out, 2) && out[0] == 0x0a && out[1] == 0xff);
     BK_CHECK(!hexDecode("0aF"_s, out, 2));
     BK_CHECK(!hexDecode("0aFg"_s, out, 2));
+}
+
+BK_TEST(argon2id_libsodium_vectors) {
+    struct Case { const char* pass; const char* salt; u32 passes, memKiB, outLen; const char* out; };
+    // salt: the first 16 bytes of the vector's salt (crypto_pwhash_SALTBYTES);
+    // memKiB: the vector's memlimit / 1024, rounded down, as libsodium does.
+    const Case cases[] = {
+        {"4a857e2ee8aa9b6056f2424e84d24a72473378906ee04a46cb05311502d5250b82"
+         "ad86b83c8f20a23dbb74f6da60b0b6ecffd67134d45946ac8ebfb3064294bc097d"
+         "43ced68642bfb8bbbdd0f50b30118f5e",
+         "39d82eef32010b8b79cc5ba88ed539fb", 3, 1432947 / 1024, 190,
+         "08d8cd330c57e1b4643241d05bb468ba4ee4e932cd0858816be9ef15360b27bbd06a87130ee92222be267a29b81f5ae8fe"
+         "8613324cfc4832dc49387fd0602f1c57b4d0f3855db94fb7e12eb05f9a484aed4a4307abf586cd3d55c809bc081541e00b"
+         "682772fb2066504ff935b8ebc551a2083882f874bc0fae68e56848ae34c91097c3bf0cca8e75c0797eef3efde3f75e0058"
+         "15018db3cf7c109a812264c4de69dcb22322dbbcfa447f5b00ecd1b04a7be1569c8e556adb7bba48adf81d"},
+        {"b540beb016a5366524d4605156493f9874514a5aa58818cd0c6dfffaa9e90205f17b",
+         "44071f6d181561670bda728d43fb79b4", 1, 1631659 / 1024, 231,
+         "7fb72409b0987f8190c3729710e98c3f80c5a8727d425fdcde7f3644d467fe973f5b5fee683bd3fce812cb9ae5e9921a2d"
+         "06c2f1905e4e839692f2b934b682f11a2fe2b90482ea5dd234863516dba6f52dc0702d324ec77d860c2e181f84472bd710"
+         "4fedce071ffa93c5309494ad51623d214447a7b2b1462dc7d5d55a1f6fd5b54ce024118d86f0c6489d16545aaa87b6689d"
+         "ad9f2fb47fda9894f8e12b87d978b483ccd4cc5fd9595cdc7a818452f915ce2f7df95ec12b1c72e3788d473441d884f974"
+         "8eb14703c21b45d82fd667b85f5b2d98c13303b3fe76285531a826b6fc0fe8e3dddecf"},
+    };
+    for (const Case& c : cases) {
+        u8 pass[128], salt[kKdfSaltBytes], out[256];
+        const StringView ph(c.pass);
+        BK_REQUIRE(hex(ph, pass) && hex(StringView(c.salt), salt));
+        String err;
+        BK_REQUIRE(kdfArgon2id(pass, ph.count / 2, salt, c.passes, c.memKiB, out, c.outLen, err));
+        BK_CHECK(StringView(c.out).count == 2 * c.outLen);
+        char got[2 * 256 + 1];
+        testHex(out, c.outLen, got);
+        BK_CHECK(StringView(got, 2 * c.outLen) == StringView(c.out));
+    }
+    // Below libsodium's floor (8 KiB) is refused, not clamped.
+    u8 salt[kKdfSaltBytes] = {}, out[32];
+    String err;
+    BK_CHECK(!kdfArgon2id("x", 1, salt, 1, 4, out, 32, err));
 }

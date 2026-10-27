@@ -110,7 +110,8 @@ set_source_files_properties(third_party/blake3/blake3_avx512.c PROPERTIES COMPIL
 add_library(bk_lz4 OBJECT third_party/lz4/lz4.c)
 target_compile_options(bk_lz4 PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
 
-# libsodium: ONE file (AES-256-GCM over AES-NI/PCLMUL) plus a five-symbol shim.
+# libsodium: AES-256-GCM over AES-NI/PCLMUL (one file), plus a small shim for
+# the support symbols it and Argon2 reference (third_party/README).
 add_library(bk_aesgcm OBJECT
     third_party/libsodium/aead_aes256gcm_aesni.c
     third_party/libsodium/shim/sodium_shim.c)
@@ -118,6 +119,44 @@ target_include_directories(bk_aesgcm PRIVATE third_party/libsodium/include/sodiu
 target_compile_definitions(bk_aesgcm PRIVATE CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1
     HAVE_TMMINTRIN_H=1 HAVE_WMMINTRIN_H=1 HAVE_GCC_MEMORY_FENCES=1 _GNU_SOURCE)
 target_compile_options(bk_aesgcm PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
+
+# libsodium: Argon2id (crypto_pwhash_argon2id) for the key file's passphrase
+# slots. The fill-block kernels for SSSE3, AVX2 and AVX-512F carry their own
+# target pragmas and are picked at run time from runtime.c's CPUID answers, as
+# upstream does; the HAVE_* defines are what configure finds on x86-64 Linux.
+# HAVE_MMAP: the (up to GiB-sized) Argon2 matrix is an anonymous mapping that
+# munmap hands straight back to the kernel. codecs.c is there only because
+# argon2.c's encoded-string API references its base64 functions; bu never
+# calls that API and --gc-sections drops it.
+add_library(bk_argon2 OBJECT
+    third_party/libsodium/argon2/argon2.c
+    third_party/libsodium/argon2/argon2-core.c
+    third_party/libsodium/argon2/argon2-encoding.c
+    third_party/libsodium/argon2/argon2-fill-block-ref.c
+    third_party/libsodium/argon2/argon2-fill-block-ssse3.c
+    third_party/libsodium/argon2/argon2-fill-block-avx2.c
+    third_party/libsodium/argon2/argon2-fill-block-avx512f.c
+    third_party/libsodium/argon2/blake2b-long.c
+    third_party/libsodium/argon2/pwhash_argon2id.c
+    third_party/libsodium/runtime.c
+    third_party/libsodium/codecs.c)
+target_include_directories(bk_argon2 PRIVATE third_party/libsodium/include/sodium)
+target_compile_definitions(bk_argon2 PRIVATE CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1
+    HAVE_EMMINTRIN_H=1 HAVE_PMMINTRIN_H=1 HAVE_TMMINTRIN_H=1 HAVE_SMMINTRIN_H=1
+    HAVE_AVXINTRIN_H=1 HAVE_AVX2INTRIN_H=1 HAVE_AVX512FINTRIN_H=1 HAVE_WMMINTRIN_H=1
+    HAVE_CPUID=1 HAVE_AVX_ASM=1 HAVE_MMAP=1 HAVE_SYS_MMAN_H=1 _GNU_SOURCE)
+target_compile_options(bk_argon2 PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
+
+# libsodium: BLAKE2b, which Argon2 uses for its first and last block only, so
+# the portable compression function is all it gets (no HAVE_* SIMD defines:
+# blake2b_pick_best_implementation then references only the reference code).
+add_library(bk_blake2b OBJECT
+    third_party/libsodium/blake2b/blake2b-ref.c
+    third_party/libsodium/blake2b/blake2b-compress-ref.c
+    third_party/libsodium/blake2b/generichash_blake2b.c)
+target_include_directories(bk_blake2b PRIVATE third_party/libsodium/include/sodium)
+target_compile_definitions(bk_blake2b PRIVATE CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1 _GNU_SOURCE)
+target_compile_options(bk_blake2b PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
 
 # ------------------------------------------------------------------- bu ----
 
@@ -162,7 +201,8 @@ target_include_directories(bk_cold PUBLIC src)
 target_compile_options(bk_cold PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
 
 set(BK_OBJECTS $<TARGET_OBJECTS:bk_hot> $<TARGET_OBJECTS:bk_cold> $<TARGET_OBJECTS:bk_blake3>
-    $<TARGET_OBJECTS:bk_lz4> $<TARGET_OBJECTS:bk_aesgcm>)
+    $<TARGET_OBJECTS:bk_lz4> $<TARGET_OBJECTS:bk_aesgcm> $<TARGET_OBJECTS:bk_argon2>
+    $<TARGET_OBJECTS:bk_blake2b>)
 
 add_executable(bu src/main.cpp ${BK_OBJECTS})
 target_include_directories(bu PRIVATE src)

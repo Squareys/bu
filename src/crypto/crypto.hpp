@@ -1,5 +1,5 @@
-// crypto.hpp — the only door to the vendored primitives (BLAKE3, AES-256-GCM)
-// and to the kernel RNG.
+// crypto.hpp — the only door to the vendored primitives (BLAKE3, AES-256-GCM,
+// Argon2id) and to the kernel RNG.
 //
 // Everything above this layer speaks in fixed-size byte arrays and never sees
 // blake3.h or a libsodium header: those are confined to crypto.cpp (hard rule
@@ -61,6 +61,17 @@ void aeadSeal(const AeadKey& st, const u8 nonce[kNonceBytes], const u8* ad, usiz
 // plaintext. False (and `out` scrubbed by libsodium) on authentication failure.
 [[nodiscard]] bool aeadOpen(const AeadKey& st, const u8 nonce[kNonceBytes], const u8* ad,
                             usize adLen, const u8* in, usize n, u8* out);
+
+// Argon2id v1.3 (RFC 9106) with one lane, libsodium's crypto_pwhash_argon2id:
+// stretches a passphrase into `outLen` bytes (16 or more). `memKiB` is the
+// memory cost in KiB, `passes` the time cost. libsodium's own bounds apply
+// (at least 8 KiB of memory and one pass); callers enforce bu's tighter ones.
+// False with `err` set when the memory cannot be allocated or a parameter is
+// out of libsodium's range. Single-threaded by construction (one lane), and
+// the first call picks the widest kernel the CPU has (SSSE3, AVX2, AVX-512F).
+constexpr u32 kKdfSaltBytes = 16;
+[[nodiscard]] bool kdfArgon2id(const void* pass, usize passLen, const u8 salt[kKdfSaltBytes], u32 passes,
+                               u32 memKiB, u8* out, usize outLen, String& err);
 
 // Kernel CSPRNG (getrandom(2), blocking until the pool is initialised).
 [[nodiscard]] bool randomBytes(void* out, usize n, String& err);

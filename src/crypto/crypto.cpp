@@ -1,4 +1,5 @@
-// crypto.cpp — thin wrappers over the vendored BLAKE3 and libsodium AES-GCM.
+// crypto.cpp — thin wrappers over the vendored BLAKE3 and libsodium's AES-GCM
+// and Argon2id.
 //
 // The ONLY translation unit that includes blake3.h or a libsodium header
 // (CLAUDE.md hard rule 4). It adds no cryptography of its own: each function
@@ -11,6 +12,9 @@
 extern "C" {
 #include "blake3.h"
 #include "sodium/crypto_aead_aes256gcm.h"
+#include "sodium/crypto_pwhash_argon2id.h"
+#include "sodium/private/implementations.h"
+#include "sodium/runtime.h"
 }
 
 #include <cpuid.h>       // __get_cpuid: our own feature check, see cryptoCpuCheck
@@ -24,6 +28,7 @@ static_assert(sizeof(AeadKey) == sizeof(crypto_aead_aes256gcm_state), "AeadKey m
 static_assert(crypto_aead_aes256gcm_ABYTES == kTagBytes && crypto_aead_aes256gcm_NPUBBYTES == kNonceBytes,
               "GCM parameters");
 static_assert(BLAKE3_KEY_LEN == kKeyBytes, "BLAKE3 key size");
+static_assert(crypto_pwhash_argon2id_SALTBYTES == kKdfSaltBytes, "Argon2id salt size");
 
 bool cryptoCpuCheck(String& err) {
     // CPUID leaf 1, read directly. __builtin_cpu_supports would do the same
@@ -90,6 +95,25 @@ BK_HOT bool aeadOpen(const AeadKey& st, const u8 nonce[kNonceBytes], const u8* a
     return crypto_aead_aes256gcm_decrypt_detached_afternm(
                n ? out : &dummy, nullptr, in, n, in + n, ad, adLen, nonce,
                reinterpret_cast<const crypto_aead_aes256gcm_state*>(&st)) == 0;
+}
+
+bool kdfArgon2id(const void* pass, usize passLen, const u8 salt[kKdfSaltBytes], u32 passes, u32 memKiB,
+                 u8* out, usize outLen, String& err) {
+    // What sodium_init() would do, minus everything else it sets up: read the
+    // CPU features, then point Argon2 at the widest fill-block kernel. Only
+    // ever reached from the main thread before any worker exists (unlocking
+    // the key is the first thing a command does), so the plain flag is enough.
+    static bool picked = false;
+    if (!picked) {
+        _sodium_runtime_get_cpu_features();
+        _crypto_pwhash_argon2_pick_best_implementation();
+        picked = true;
+    }
+    if (crypto_pwhash_argon2id(out, outLen, static_cast<const char*>(pass), passLen, salt, passes,
+                               usize(memKiB) * 1024, crypto_pwhash_argon2id_ALG_ARGON2ID13) == 0)
+        return true;
+    if (errno == ENOMEM) return errSet(err, "Argon2id: not enough memory for the key slot's memory cost");
+    return errSet(err, "Argon2id: parameters out of range");
 }
 
 bool randomBytes(void* out, usize n, String& err) {

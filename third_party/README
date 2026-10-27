@@ -48,30 +48,72 @@ LZ4  1.10.0  —  BSD-2-Clause (lib/ only)
               (~700 MB/s per core compressing, several GB/s decompressing),
               with a bounds-checked decoder.
 
-libsodium  1.0.22  —  ISC
+libsodium  1.0.22  —  ISC (Argon2 files: CC0-1.0 / Apache-2.0 per their headers,
+                         redistributed under libsodium's ISC terms)
     Upstream: https://github.com/jedisct1/libsodium/releases/download/1.0.22-RELEASE/libsodium-1.0.22.tar.gz
     sha256:   adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349
-    Files:    libsodium/aead_aes256gcm_aesni.c
-                (= src/libsodium/crypto_aead/aes256gcm/aesni/aead_aes256gcm_aesni.c)
+    Files (paths after "=" are upstream's, under src/libsodium/; every file
+    is byte-identical to the release tarball's):
+      AES-256-GCM
+              libsodium/aead_aes256gcm_aesni.c
+                (= crypto_aead/aes256gcm/aesni/aead_aes256gcm_aesni.c)
+      Argon2id
+              libsodium/argon2/{argon2.c,argon2.h,argon2-core.c,argon2-core.h,
+                argon2-encoding.c,argon2-encoding.h,argon2-fill-block-ref.c,
+                argon2-fill-block-ssse3.c,argon2-fill-block-avx2.c,
+                argon2-fill-block-avx512f.c,blake2b-long.c,blake2b-long.h,
+                blamka-round-ref.h,blamka-round-ssse3.h,blamka-round-avx2.h,
+                blamka-round-avx512f.h,pwhash_argon2id.c}
+                (= crypto_pwhash/argon2/*)
+              libsodium/blake2b/{blake2b-ref.c,blake2b-compress-ref.c,blake2.h,
+                generichash_blake2b.c}
+                (= crypto_generichash/blake2b/ref/*)
+              libsodium/runtime.c (= sodium/runtime.c): CPU feature detection
+                that picks the Argon2 kernel.
+              libsodium/codecs.c (= sodium/codecs.c): base64, referenced only
+                by argon2.c's encoded-string API, which bu never calls.
+      Headers
               libsodium/include/sodium/{core.h,crypto_aead_aes256gcm.h,
+                crypto_generichash_blake2b.h,crypto_pwhash_argon2id.h,
                 crypto_verify_16.h,export.h,randombytes.h,runtime.h,utils.h,
-                private/common.h,private/sse2_64_32.h}  (declarations it includes)
+                private/common.h,private/implementations.h,
+                private/sse2_64_32.h}  (declarations the files above include)
               libsodium/LICENSE
               libsodium/shim/sodium_shim.c — NOT upstream: written for bu
-                (MIT, like src/). Defines the five support symbols the AES-GCM
-                file references (sodium_misuse, sodium_memzero,
-                crypto_verify_16, sodium_runtime_has_{aesni,pclmul,avx}) so that
-                one file of libsodium can be vendored instead of the library.
-    Target:   bk_aesgcm. Header confined to src/crypto/crypto.cpp.
-    Config:   CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1 HAVE_TMMINTRIN_H=1
+                (MIT, like src/). Defines the support symbols the vendored
+                files reference (sodium_misuse, sodium_memzero, sodium_memcmp,
+                crypto_verify_16, randombytes_buf) so that these files can be
+                vendored instead of the library and its init/RNG/allocator
+                machinery.
+    Targets:  bk_aesgcm (AES-GCM + shim), bk_argon2 (Argon2id, runtime.c,
+              codecs.c), bk_blake2b. Headers confined to src/crypto/crypto.cpp.
+    Config:   bk_aesgcm: CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1 HAVE_TMMINTRIN_H=1
               HAVE_WMMINTRIN_H=1 HAVE_GCC_MEMORY_FENCES=1 — what libsodium's
               configure would define on x86-64 Linux.
-    Why:      a vetted, self-contained AES-256-GCM over AES-NI + PCLMULQDQ
-              (7 blocks in parallel with aggregated GHASH) by
-              the libsodium author, with runtime target attributes so it
-              compiles into a generic x86-64 binary. Needs AES-NI, PCLMULQDQ and
-              AVX at run time; src/crypto/crypto.cpp refuses other CPUs by name.
+              bk_argon2: the same base plus HAVE_{EMM,PMM,TMM,SMM,AVX,AVX2,
+              AVX512F,WMM}INTRIN_H, HAVE_CPUID, HAVE_AVX_ASM (runtime.c's
+              CPUID/XGETBV paths), HAVE_MMAP and HAVE_SYS_MMAN_H (the Argon2
+              matrix is an anonymous mapping, returned to the kernel by munmap).
+              The SSSE3/AVX2/AVX-512F fill-block files set their own target
+              pragmas; argon2-core.c picks one at run time, after
+              src/crypto/crypto.cpp has called _sodium_runtime_get_cpu_features
+              (what sodium_init would do).
+              bk_blake2b: no SIMD defines, so only the portable BLAKE2b
+              compression is compiled and dispatched to. Argon2 uses BLAKE2b
+              for its first and last blocks only; the per-pass work is the
+              fill-block kernel.
+    Why:      AES-256-GCM: a vetted, self-contained AES-256-GCM over AES-NI +
+              PCLMULQDQ (7 blocks in parallel with aggregated GHASH) by the
+              libsodium author, with runtime target attributes so it compiles
+              into a generic x86-64 binary. Needs AES-NI, PCLMULQDQ and AVX at
+              run time; src/crypto/crypto.cpp refuses other CPUs by name.
               There is no VAES/VPCLMULQDQ (AVX-512 wide) path in this release;
               see docs/design.md for what that would buy.
+              Argon2id: the memory-hard passphrase KDF of RFC 9106 (and of
+              LUKS2), for the key file's passphrase slots. libsodium's copy is
+              the reference implementation plus SIMD kernels, from the same
+              release as the AES-GCM file, so one provenance covers both.
     Tests:    tests/test_crypto.cpp — GCM spec test cases 13-16 and OpenSSL-
-              computed tags for 113 B .. 64 KiB messages (tests/tools/gcm_reference.py).
+              computed tags for 113 B .. 64 KiB messages (tests/tools/gcm_reference.py);
+              Argon2id: two of libsodium's own test vectors
+              (test/default/pwhash_argon2id.c, tv cases 4 and 6).

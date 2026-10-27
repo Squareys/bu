@@ -117,5 +117,15 @@ int main(int argc, char** argv) {
         done += rnd.count;
     }
     line("FastCDC scan + select (pipeline form)", done, secondsSince(t0));
+
+    // Argon2id, one pass, at the memory costs a key slot uses: the per-pass
+    // time the key-slot calibration (format/keyfile.cpp) extrapolates from.
+    const u32 kMemMiB[] = {64, 256, 1024};
+    for (u32 memMiB : kMemMiB) {
+        u8 salt[kKdfSaltBytes] = {}, kek[32];
+        t0 = nowNs();
+        if (!kdfArgon2id("passphrase", 10, salt, 1, memMiB << 10, kek, 32, err)) { bad++; continue; }
+        printf("  Argon2id, %4u MiB, one pass              %8.0f ms\n", memMiB, secondsSince(t0) * 1e3);
+    }
     return bad ? 1 : 0;
 }
