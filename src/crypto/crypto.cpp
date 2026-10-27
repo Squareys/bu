@@ -69,6 +69,13 @@ BK_HOT void blake3Keyed(const Key& key, const void* data, usize n, u8* out, usiz
     blake3_hasher_finalize(&h, out, outLen);
 }
 
+BK_HOT void blake3Parts(const Key* key, const HashPart* parts, u32 n, u8* out, usize outLen) {
+    blake3_hasher h;
+    if (key) blake3_hasher_init_keyed(&h, key->b); else blake3_hasher_init(&h);
+    for (u32 i = 0; i < n; ++i) blake3_hasher_update(&h, parts[i].ptr, parts[i].len);
+    blake3_hasher_finalize(&h, out, outLen);
+}
+
 BK_HOT void blake3DeriveKey(StringView context, const void* material, usize n, Key& out) {
     blake3_hasher h;
     blake3_hasher_init_derive_key_raw(&h, context.ptr, context.count);

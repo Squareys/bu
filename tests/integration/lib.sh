@@ -41,6 +41,11 @@ assert_same_tree() {
     fi
 }
 
+# Feed FILE to a command through a pipe (not a regular file on stdin), so
+# bu reads it as a stream: `piped FILE cmd...`. The writer may die of
+# SIGPIPE when bu stops early; that is not the test's failure.
+piped() { local f="$1"; shift; { cat "$f" || true; } | "$@"; }
+
 assert_between() {   # assert_between VALUE MIN MAX WHAT
     [ "$1" -ge "$2" ] && [ "$1" -le "$3" ] || fail "$4 = $1, expected between $2 and $3"
 }
@@ -59,3 +64,4 @@ expect_fail() {   # expect_fail PATTERN cmd...
 # Mode 600: a passphrase file others can read is warned about.
 (umask 077; printf 'integration test passphrase\n' > pass)
 "$BU" key init --passphrase-file pass --kdf-memory 8 --kdf-time 1 key 2>/dev/null
+K=(--key key --passphrase-file pass)

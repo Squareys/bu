@@ -1,7 +1,8 @@
 // snapshot.hpp — the file tree of one backup (the manifest) and its encoding.
 //
 // A Snapshot is data-oriented: one Array<Entry>, one byte store for all
-// names, one Array<ChunkId> holding every file's chunk list back to back.
+// names, one Array<ChunkId> holding every file's chunk list back to back
+// and, parallel to it, each chunk's size.
 // Entries are in walk order — depth-first, children sorted by name — so a
 // directory always precedes what it contains (restore creates in one pass)
 // and consecutive paths share long prefixes (the encoding exploits that).
@@ -13,7 +14,7 @@
 // 1 GB SQLite database with 2% of its pages changed therefore costs ~2% of its
 // chunk IDs in the increment, not all 262144 of them; an unchanged file costs
 // its metadata and one COPY. Decoding needs the parent snapshot, which is
-// found by its 16-byte snapshot ID among the backup files given — and merge
+// found by its 16-byte snapshot ID among the segments given — and merge
 // keeps a snapshot's ID, so increments made after a merge still find theirs.
 //
 // The files-cache fields (dev, ino, ctime) live in every manifest, not only
@@ -52,11 +53,13 @@ struct Snapshot {
     u8 id[kSnapshotIdBytes] = {};
     u8 parent[kSnapshotIdBytes] = {};
     bool hasParent = false;
+    bool delta = false;        // encoded against the parent (needs it to decode)
     u64 gen = 0;               // 1 for a full backup, parent's + 1 for an increment
     i64 createdNs = 0;         // wall clock when create started (files-cache race guard)
     String names;
     Array<Entry> entries;
     Array<ChunkId> refs;
+    Array<u32> sizes;          // per ref: the chunk's size
     HashIndex pathIndex;       // built by snapshotIndexPaths
 
     Snapshot() = default;
@@ -79,14 +82,16 @@ void snapshotIndexPaths(Snapshot& s);
 u32 snapshotFind(const Snapshot& s, StringView path);
 
 // Encode. With `parent` non-null the result is a delta manifest against it
-// (s.parent must be parent->id and s.hasParent true); otherwise self-contained.
+// (s.parent must be parent->id and s.hasParent true); otherwise
+// self-contained, which a snapshot with a parent may also be (a checkpoint:
+// readers resolving a chain stop there, docs/design.md §5).
 void snapshotEncode(const Snapshot& s, const Snapshot* parent, ByteWriter& out);
 
 // Just the header fields, without decoding entries (to find parents first).
 [[nodiscard]] bool snapshotPeek(const u8* p, usize n, Snapshot& headerOut);
 
 // Decode. `parent` must be the snapshot whose ID the header names when the
-// manifest is a delta, and is ignored otherwise. Every path is validated
+// manifest is a delta (head.delta), and is ignored otherwise. Every path is validated
 // (relative, no empty, "." or ".." components) — restore relies on it.
 [[nodiscard]] bool snapshotDecode(const u8* p, usize n, const Snapshot* parent, Snapshot& out, String& err);
 
@@ -95,19 +100,20 @@ bool pathIsSafe(StringView p);
 
 // ---- the index file body -----------------------------------------------------
 //
-// An index is the latest snapshot, self-contained (it is the files cache and
-// the dedupe set at once: the set of chunks the next increment may reference
-// is exactly the chunks this snapshot references), plus an advisory location
-// table: for each distinct chunk, which backup file (by the first 16 bytes of
-// that file's salt) it was written to. Restore never needs the table — it finds
-// chunks by ID across whatever files it is given, which is what keeps chains
-// working after merges rename everything — but `bu list` shows it.
+// An index is the latest snapshot, self-contained: it is the files cache and
+// the dedupe set at once (the chunks the next increment may reference are
+// exactly the chunks this snapshot references). Only writing a new segment
+// somewhere the chain cannot be read back from — a pipe, or a separate file
+// per increment — needs one; appending to a chain file reads the same from
+// the chain's tail. Two counters carry the checkpoint rule across runs: the
+// manifest bytes written as deltas since the chain's last self-contained
+// manifest, and that manifest's size.
 
 struct IndexData {
     Snapshot snap;
     Array<ChunkId> distinct;      // distinct refs, first-appearance order
-    Array<u32> location;          // per distinct ref: slot into backups
-    Array<ChunkId> backups;       // backup file ids (salt prefixes)
+    u64 deltaBytes = 0;           // delta manifest bytes since the last self-contained one
+    u64 fullBytes = 0;            // the last self-contained manifest's bytes
 };
 
 // Fill `distinct` from snap.refs (first-appearance order).

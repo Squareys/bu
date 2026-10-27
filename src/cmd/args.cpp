@@ -18,7 +18,8 @@ const Spec kSpecs[] = {
     {"-j"_s, kArgJobs, true},
     {"--no-files-cache"_s, kArgNoCache, false},
     {"-C"_s, kArgDir, true},
-    {"--path"_s, kArgPath, true},
+    {"--index"_s, kArgIndex, true},
+    {"--no-key"_s, kArgNoKey, false},
     {"-o"_s, kArgOut, true},
     {"-v"_s, kArgVerbose, false},
     {"--passphrase-file"_s, kArgPassFile, true},
@@ -52,14 +53,14 @@ bool numberIn(const char* cmd, StringView opt, const char* value, u64 lo, u64 hi
 bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, Args& out) {
     u32 seen = 0;
     bool endOfOptions = false;
-    if (allowed & kArgKey) allowed |= kArgPass;
+    if (allowed & kArgKey) allowed |= kArgPass | kArgNoKey;
     for (int i = first; i < argc; ++i) {
         const StringView a(argv[i]);
         if (endOfOptions || a.empty() || a[0] != '-' || a == "-"_s) {
             out.positional.push(argv[i]);
             continue;
         }
-        if (a == "--"_s) { endOfOptions = true; continue; }
+        if (a == "--"_s) { endOfOptions = true; out.dashDash = out.positional.count; continue; }
         const Spec* spec = nullptr;
         for (const Spec& s : kSpecs) if (s.name == a) { spec = &s; break; }
         if (!spec || !(allowed & spec->flag)) return usageError(cmd, "unknown option '"_s, a, "'"_s);
@@ -76,7 +77,8 @@ bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, A
         case kArgBase: out.base = value; break;
         case kArgIndexOut: out.indexOut = value; break;
         case kArgDir: out.dir = value; break;
-        case kArgPath: out.path = value; break;
+        case kArgIndex: out.index = value; break;
+        case kArgNoKey: out.noKey = true; break;
         case kArgOut: out.out = value; break;
         case kArgNoCache: out.noCache = true; break;
         case kArgVerbose: out.verbose = true; break;
@@ -123,7 +125,8 @@ bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, A
         default: break;
         }
     }
-    if ((allowed & kArgKey) && !out.key) return usageError(cmd, "--key KEYFILE is required"_s);
+    if (out.key && out.noKey) return usageError(cmd, "give --key KEYFILE or --no-key, not both"_s);
+    if (out.noKey && (seen & kArgPass)) return usageError(cmd, "--passphrase-file and --passphrase-fd go with --key"_s);
     if ((seen & kArgPassFile) && (seen & kArgPassFd))
         return usageError(cmd, "give --passphrase-file or --passphrase-fd, not both"_s);
     if ((seen & kArgNewPassFile) && (seen & kArgNewPassFd))
@@ -131,6 +134,11 @@ bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, A
     if ((seen & kArgKdfTime) && (seen & kArgKdfTargetMs))
         return usageError(cmd, "give --kdf-time or --kdf-target-ms, not both"_s);
     return true;
+}
+
+int usage(const char* cmd, StringView msg) {
+    usageError(cmd, msg);
+    return kExitUsage;
 }
 
 void report(StringView msg) {

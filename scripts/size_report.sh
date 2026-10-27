@@ -22,7 +22,7 @@ nm --size-sort -S -C "$SYM" | awk '
     if (name ~ /^blake3_/)                              c = "BLAKE3 (vendored)"
     else if (name ~ /^LZ4_|^LZ4/)                       c = "LZ4 (vendored)"
     else if (name ~ /^bk::codec(Encode|Decode)/)        c = "LZ4 (vendored, inlined into bk::codec*)"
-    else if (name ~ /^bk::(cdc|blake3|aead|chunkIdOf|recordSeal|recordOpen)|kGear/) c = "bu hot path (src/, -O2)"
+    else if (name ~ /^bk::(cdc|blake3|aead)|kGear/) c = "bu hot path (src/, -O2)"
     else if (name ~ /argon2|blake2b|pwhash|generichash|fill_segment|fill_block|fill_memory|_sodium_runtime|^sodium_runtime|^sodium_base64|^sodium_bin2|^sodium_hex2|^(encode|decode)_string|^initial_hash|^index_alpha|^generate_addresses|^finalize|^validate_inputs|^next_addresses/) c = "Argon2id + BLAKE2b (libsodium, vendored)"
     else if (name ~ /aes256gcm|^gh_|^aes_gcm|^crypto_verify|^sodium_|^expand256|^encrypt|^precomp/) c = "AES-256-GCM (libsodium, vendored)"
     else if (name ~ /^bk::|^main$/)                     c = "bu cold path (src/, -Oz)"

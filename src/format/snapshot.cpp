@@ -2,7 +2,8 @@
 //
 // Wire format of a manifest (docs/format.md §Manifest has the same in prose):
 //
-//   varint version (1) | id[16] | u8 flags (bit 0: delta) | [parent[16]]
+//   varint version (2) | id[16] | u8 flags (bit 0: parent, bit 1: delta)
+//   | [parent[16]]
 //   | varint gen | svarint createdNs | varint entryCount | varint refCount
 //   then per entry:
 //     varint sharedPrefix | varint suffixLen | suffix     path, prefix-coded
@@ -10,10 +11,17 @@
 //     svarint mtimeNs | svarint ctimeNs | varint dev | varint ino
 //     file:    varint size | u8 base | varint opCount | ops
 //     symlink: varint targetLen | target
-//   op: varint (n << 2 | kind); kind 0 COPY n, 1 SEEK zigzag(n), 2 NEW n + n ids
+//   op: varint (n << 2 | kind); kind 0 COPY n, 1 SEEK zigzag(n),
+//       2 NEW n + n × (id[16] | varint size)
+//
+// Every ref carries its chunk's size (a NEW states it, a COPY inherits it
+// from the parent: equal IDs, equal content). A snapshot alone then says
+// where every chunk goes in its file, which a restore from a pipe needs: the
+// chunk tables arrive only at the end of each segment, after the data.
 //
 // `base` is 1 when the ops run against the parent snapshot's chunk list for
-// the same path; 0 means there is no list to copy from and every op is NEW.
+// the same path (delta manifests only); 0 means there is no list to copy from
+// and every op is NEW.
 
 #include "format/snapshot.hpp"
 
@@ -22,6 +30,7 @@ namespace bk {
 namespace {
 
 constexpr u32 kMaxPath = 4096;
+constexpr u32 kMaxChunkSize = 64u << 10;   // segment.hpp's kMaxChunk
 constexpr u8 kOpCopy = 0, kOpSeek = 1, kOpNew = 2;
 
 void putOp(ByteWriter& w, u8 kind, u64 n) { w.varint((n << 2) | kind); }
@@ -32,7 +41,7 @@ void putOp(ByteWriter& w, u8 kind, u64 n) { w.varint((n << 2) | kind); }
 // That captures in-place page rewrites (SQLite), insertions and deletions
 // (CDC re-synchronising) and moved blocks, which is every pattern that occurs
 // between two versions of one file, in O(n) with one hash table per file.
-void encodeOps(Span<const ChunkId> cur, Span<const ChunkId> old, ByteWriter& w) {
+void encodeOps(Span<const ChunkId> cur, const u32* sizes, Span<const ChunkId> old, ByteWriter& w) {
     // Position lookup only pays off on longer lists; a short one is scanned.
     HashIndex pos;
     const bool useMap = old.count > 16;
@@ -74,7 +83,7 @@ void encodeOps(Span<const ChunkId> cur, Span<const ChunkId> old, ByteWriter& w) 
         const u32 start = i;
         while (i < cur.count && !(j < old.count && idEqual(cur[i], old[j])) && findOld(cur[i]) == kInvalidIndex) ++i;
         putOp(ops, kOpNew, i - start); ++opCount;
-        for (u32 k = start; k < i; ++k) ops.bytes(cur[k].b, kIdBytes);
+        for (u32 k = start; k < i; ++k) { ops.bytes(cur[k].b, kIdBytes); ops.varint(sizes[k]); }
     }
     w.varint(opCount);
     w.bytes(ops.buf.ptr, ops.buf.count);
@@ -118,10 +127,10 @@ bool pathIsSafe(StringView p) {
 
 void snapshotEncode(const Snapshot& s, const Snapshot* parent, ByteWriter& w) {
     w.buf.reserve(s.entries.count * 48 + s.names.count + 64);
-    w.varint(1);
+    w.varint(2);
     w.bytes(s.id, kSnapshotIdBytes);
-    w.byte(parent ? 1 : 0);
-    if (parent) w.bytes(parent->id, kSnapshotIdBytes);
+    w.byte(u8((s.hasParent ? 1 : 0) | (parent ? 2 : 0)));
+    if (s.hasParent) w.bytes(s.parent, kSnapshotIdBytes);
     w.varint(s.gen);
     w.svarint(s.createdNs);
     w.varint(s.entries.count);
@@ -145,6 +154,7 @@ void snapshotEncode(const Snapshot& s, const Snapshot* parent, ByteWriter& w) {
         if (e.type == kEntryFile) {
             w.varint(e.size);
             const Span<const ChunkId> cur(s.refs.ptr + e.firstRef, e.refCount);
+            const u32* sizes = s.sizes.ptr + e.firstRef;
             u32 pi = kInvalidIndex;
             if (parent) {
                 pi = snapshotFind(*parent, path);
@@ -153,10 +163,10 @@ void snapshotEncode(const Snapshot& s, const Snapshot* parent, ByteWriter& w) {
             if (pi != kInvalidIndex) {
                 const Entry& pe = parent->entries[pi];
                 w.byte(1);
-                encodeOps(cur, Span<const ChunkId>(parent->refs.ptr + pe.firstRef, pe.refCount), w);
+                encodeOps(cur, sizes, Span<const ChunkId>(parent->refs.ptr + pe.firstRef, pe.refCount), w);
             } else {
                 w.byte(0);
-                encodeOps(cur, Span<const ChunkId>(), w);
+                encodeOps(cur, sizes, Span<const ChunkId>(), w);
             }
         } else if (e.type == kEntrySymlink) {
             w.str(entryTarget(s, e));
@@ -167,11 +177,12 @@ void snapshotEncode(const Snapshot& s, const Snapshot* parent, ByteWriter& w) {
 namespace {
 
 bool decodeHeader(ByteReader& r, Snapshot& out) {
-    if (r.varint() != 1) return false;
+    if (r.varint() != 2) return false;
     r.bytes(out.id, kSnapshotIdBytes);
     const u8 flags = r.byte();
-    if (flags > 1) return false;
+    if (flags > 3 || flags == 2) return false;    // a delta needs a parent
     out.hasParent = flags & 1;
+    out.delta = flags & 2;
     if (out.hasParent) r.bytes(out.parent, kSnapshotIdBytes);
     else memSet(out.parent, 0, kSnapshotIdBytes);
     out.gen = r.varint();
@@ -189,7 +200,8 @@ bool snapshotPeek(const u8* p, usize n, Snapshot& out) {
 bool snapshotDecode(const u8* p, usize n, const Snapshot* parent, Snapshot& out, String& err) {
     ByteReader r(p, n);
     if (!decodeHeader(r, out)) return errSet(err, "malformed manifest header");
-    if (out.hasParent && (!parent || !memEqual(parent->id, out.parent, kSnapshotIdBytes)))
+    if (!out.delta) parent = nullptr;
+    else if (!parent || !memEqual(parent->id, out.parent, kSnapshotIdBytes))
         return errSet(err, "delta manifest decoded without its parent snapshot");
     // Every entry takes at least 12 bytes, so the count is bounded by the
     // input. Refs are not (a COPY spells many from two bytes), so they get an
@@ -200,6 +212,7 @@ bool snapshotDecode(const u8* p, usize n, const Snapshot* parent, Snapshot& out,
     if (r.failed) return errSet(err, "malformed manifest header");
     out.entries.reserve(u32(count));
     out.refs.reserve(u32(min<u64>(refTotal, n + (parent ? parent->refs.count : 0))));
+    out.sizes.reserve(out.refs.cap);
     out.names.reserve(u32(n));
     String prev;
     for (u64 k = 0; k < count; ++k) {
@@ -233,6 +246,7 @@ bool snapshotDecode(const u8* p, usize n, const Snapshot* parent, Snapshot& out,
                 return errSet(err, "malformed manifest entry");
             }
             const ChunkId* old = pe ? parent->refs.ptr + pe->firstRef : nullptr;
+            const u32* oldSizes = pe ? parent->sizes.ptr + pe->firstRef : nullptr;
             const u32 oldCount = pe ? pe->refCount : 0;
             const u64 ops = r.varintMax(r.remaining());
             e.firstRef = out.refs.count;
@@ -244,19 +258,28 @@ bool snapshotDecode(const u8* p, usize n, const Snapshot* parent, Snapshot& out,
                 if (kind == kOpCopy) {
                     if (j + m > oldCount || out.refs.count + m > refTotal) return errSet(err, "manifest COPY out of range");
                     out.refs.appendRange(old + j, u32(m));
+                    out.sizes.appendRange(oldSizes + j, u32(m));
                     j += m;
                 } else if (kind == kOpSeek) {
                     const i64 nj = i64(j) + zigzagDecode(m);
                     if (nj < 0 || u64(nj) > oldCount) return errSet(err, "manifest SEEK out of range");
                     j = u64(nj);
                 } else if (kind == kOpNew) {
-                    if (m > r.remaining() / kIdBytes || out.refs.count + m > refTotal) return errSet(err, "manifest NEW out of range");
-                    for (u64 q = 0; q < m; ++q) r.bytes(out.refs.addDefault().b, kIdBytes);
+                    if (m > r.remaining() / (kIdBytes + 1) || out.refs.count + m > refTotal) return errSet(err, "manifest NEW out of range");
+                    for (u64 q = 0; q < m; ++q) {
+                        r.bytes(out.refs.addDefault().b, kIdBytes);
+                        const u32 size = u32(r.varintMax(kMaxChunkSize));
+                        if (size == 0) r.failed = true;
+                        out.sizes.push(size);
+                    }
                 } else {
                     return errSet(err, "malformed manifest op");
                 }
             }
             e.refCount = out.refs.count - e.firstRef;
+            u64 sum = 0;
+            for (u32 q = e.firstRef; q < out.sizes.count; ++q) sum += out.sizes[q];
+            if (!r.failed && sum != e.size) return errSet(err, "manifest chunk sizes do not add up to the file size");
         } else if (e.type == kEntrySymlink) {
             const StringView t = r.str(kMaxPath);
             e.targetLen = t.count;
@@ -292,33 +315,27 @@ void indexCollectDistinct(IndexData& d) {
 void indexEncode(const IndexData& d, ByteWriter& w) {
     ByteWriter snap;
     snapshotEncode(d.snap, nullptr, snap);
-    w.varint(1);
+    w.varint(2);
     w.varint(snap.buf.count);
     w.bytes(snap.buf.ptr, snap.buf.count);
-    w.varint(d.backups.count);
-    for (const ChunkId& b : d.backups) w.bytes(b.b, kIdBytes);
-    w.varint(d.location.count);
-    for (u32 l : d.location) w.varint(l);
+    w.varint(d.deltaBytes);
+    w.varint(d.fullBytes);
 }
 
 bool indexDecode(const u8* p, usize n, IndexData& d, String& err) {
     ByteReader r(p, n);
-    if (r.varint() != 1) return errSet(err, "unsupported index version");
+    if (r.varint() != 2) return errSet(err, "unsupported index version");
     const u64 snapLen = r.varintMax(r.remaining());
     const u8* snap = r.take(snapLen);
     if (!snap || !snapshotDecode(snap, snapLen, nullptr, d.snap, err)) {
         if (err.empty()) errSet(err, "malformed index");
         return false;
     }
-    const u64 nb = r.varintMax(r.remaining() / kIdBytes);
-    d.backups.resize(u32(nb));
-    for (u32 i = 0; i < nb; ++i) r.bytes(d.backups[i].b, kIdBytes);
-    const u64 nl = r.varintMax(r.remaining());
-    d.location.resize(u32(nl));
-    for (u32 i = 0; i < nl; ++i) d.location[i] = u32(r.varintMax(nb ? nb - 1 : 0));
+    if (d.snap.delta) return errSet(err, "malformed index (a delta snapshot)");
+    d.deltaBytes = r.varint();
+    d.fullBytes = r.varint();
     if (r.failed || !r.done()) return errSet(err, "malformed index");
     indexCollectDistinct(d);
-    if (d.location.count != d.distinct.count) return errSet(err, "index location table does not match its snapshot");
     return true;
 }
 

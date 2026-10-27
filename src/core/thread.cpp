@@ -86,6 +86,7 @@ void* helperMain(void* argp) {
 
 void ThreadPool::init(u32 threadCount) {
     mu.init(); wake.init(); finished.init();
+    started = true;
     threads = threadCount ? threadCount : 1;
     helperCount = 0;
     if (threads > 1) {
@@ -101,6 +102,8 @@ void ThreadPool::init(u32 threadCount) {
 }
 
 void ThreadPool::shutdown() {
+    if (!started) return;
+    started = false;
     mu.lock(); stopping = true; wake.broadcast(); mu.unlock();
     for (u32 i = 0; i < helperCount; ++i) helpers[i].join();
     defaultAllocator().free(helpers);

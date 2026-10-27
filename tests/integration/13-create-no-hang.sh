@@ -17,8 +17,9 @@ seq 1 400000 > src/log.txt
 for i in $(seq 1 300); do prand "s$i" $(( (i * 7919) % 120000 + 1 )) > "src/s/f$i"; done
 
 for i in $(seq 1 40); do
-    timeout 20 taskset -c 0-3 "$BU" create --key key --passphrase-file pass --index-out idx -j 16 src > b.bk \
+    rm -f b.bu
+    timeout 20 taskset -c 0-3 "$BU" create "${K[@]}" -j 16 b.bu src \
         || fail "create did not finish (run $i; exit $?)"
 done
-"$BU" check --key key --passphrase-file pass b.bk
+"$BU" check "${K[@]}" b.bu
 note ok

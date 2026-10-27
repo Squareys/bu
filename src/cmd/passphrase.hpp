@@ -5,7 +5,7 @@
 // first line, without its line ending), --passphrase-fd N (bytes up to the
 // first newline or end of input), or the controlling terminal. The terminal
 // is /dev/tty opened directly, with echo off: stdin and stdout carry backup
-// data (`bu create ... > x.bk`, `... | bu ...`), so they can be neither the
+// data (`bu create ... - src | ...`, `... | bu restore -`), so they can be neither the
 // prompt nor the answer. Without a terminal and without a file or fd, the
 // command fails and says which flags would have worked; it never falls back
 // to reading stdin.
@@ -16,7 +16,7 @@
 #pragma once
 
 #include "cmd/args.hpp"
-#include "format/container.hpp"
+#include "format/segment.hpp"
 #include "format/keyfile.hpp"
 
 namespace bk {
@@ -49,5 +49,13 @@ void warnKdfSkipped(const char* path, const KeyFile& f, u32 kdfFailed);
 // a.key, get the passphrase (a.passFile, a.passFd or the terminal), unlock,
 // derive. Reports the error itself; false means exit 1.
 [[nodiscard]] bool unlockKeyForCommand(const Args& a, MasterKey& out);
+
+// The key for a chain whose first header says it is encrypted or not
+// (`plain`), named `what` in messages: --key for an encrypted chain (asked
+// for by name when missing), nothing for an unencrypted one, and either flag
+// refused when it does not fit — so an unencrypted chain put in place of an
+// encrypted one is refused, not quietly read, whenever --key is given.
+// Returns kExitOk, or the exit status after reporting.
+[[nodiscard]] int keyForChain(const Args& a, const char* cmd, bool plain, StringView what, MasterKey& out);
 
 } // namespace bk

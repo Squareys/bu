@@ -7,7 +7,7 @@
 // that Argon2id stretches from one passphrase and the slot's own salt. Any
 // slot's passphrase recovers the same K, so passphrases can be added,
 // changed and removed without touching a single backup: everything in a
-// backup is derived from K (format/container.hpp), never from a passphrase.
+// backup is derived from K (format/segment.hpp), never from a passphrase.
 //
 // Fixed layout, 944 bytes (docs/format.md has it byte by byte):
 //

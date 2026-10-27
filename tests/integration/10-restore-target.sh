@@ -13,7 +13,7 @@ echo hello > src/sub/b.txt
 echo tool > src/tool && chmod 4755 src/tool
 echo grp > src/grp && chmod 2750 src/grp
 chmod 750 src/sub
-"$BU" create --key key --passphrase-file pass --index-out idx src > full.bk
+"$BU" create "${K[@]}" c.bu src
 
 # A hard link planted at a restored file's name, pointing outside the tree.
 echo "outside, must not change" > victim
@@ -21,7 +21,7 @@ mkdir -p out/src/sub
 ln victim out/src/a.bin
 # A FIFO planted at another: an O_TRUNC open would block forever.
 mkfifo out/src/sub/b.txt
-timeout 30 "$BU" restore --key key --passphrase-file pass -C out full.bk \
+timeout 30 "$BU" restore "${K[@]}" -C out c.bu \
     || fail "restore into a prepared target failed (or hung on the FIFO)"
 [ "$(cat victim)" = "outside, must not change" ] || fail "restore wrote through a planted hard link"
 [ "$(stat -c %h victim)" = 1 ] || fail "planted hard link still shares the victim's inode"
@@ -40,10 +40,10 @@ else
 fi
 
 # A normal overwrite still works: restoring again over the restored tree.
-"$BU" restore --key key --passphrase-file pass -C out full.bk
+"$BU" restore "${K[@]}" -C out c.bu
 cmp -s src/a.bin out/src/a.bin || fail "a.bin after a second restore"
 # A directory where a file belongs is reported, not removed.
 rm out/src/a.bin && mkdir out/src/a.bin
-expect_fail "a.bin: File exists" "$BU" restore --key key --passphrase-file pass -C out full.bk
+expect_fail "a.bin: File exists" "$BU" restore "${K[@]}" -C out c.bu
 [ -d out/src/a.bin ] || fail "directory in the way was removed"
 note ok

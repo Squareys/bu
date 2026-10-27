@@ -6,11 +6,12 @@
 // while mapped turns the next load into SIGBUS, and a backup tool reads files
 // other programs are writing.
 //
-// OutStream is the buffered sink for a container being streamed to stdout: a
-// pipe to `aws s3 cp -` or a file, it does not care. It writes in large
-// blocks (kOutBlock) because a pipe reader wakes per write, and it counts every
-// byte so the writer knows each record's offset without seeking — stdout may
-// not be seekable.
+// OutStream is the buffered sink for a segment being written: appended to a
+// chain file, or streamed to a pipe (`aws s3 cp -`), it does not care. It
+// writes in large blocks (kOutBlock) because a pipe reader wakes per write,
+// and it counts every byte so the writer knows each record's offset without
+// seeking — a pipe cannot seek. `toMemory` keeps everything in `buf` instead
+// (an index file, written atomically once complete).
 #pragma once
 
 #include "core/array.hpp"
@@ -43,6 +44,7 @@ struct OutStream {
     Array<u8> buf;
     u64 written = 0;     // bytes accepted so far (buffered + flushed)
     bool failed = false;
+    bool toMemory = false;
     int savedErrno = 0;
 
     void init(int outFd) { fd = outFd; buf.reserve(kOutBlock); buf.count = 0; }
@@ -64,6 +66,17 @@ struct OutStream {
 // `path` itself is replaced, not followed: a symlink there is replaced by the
 // new file (keyFileReplace refuses that case before calling this).
 [[nodiscard]] bool writeFileAtomic(const char* path, const void* data, usize n, String& err);
+// The two halves of writeFileAtomic, for a file written in pieces (merge's
+// output): a new temp file beside `path` (its name in `tmp`; -1 with `err`
+// on failure), and, once it is written and fsynced, the rename over `path`
+// and the fsync of the directory.
+int tempFileBeside(const char* path, String& tmp, String& err);
+[[nodiscard]] bool renameDurably(const char* tmp, const char* path, String& err);
+
+// Grow a pipe's buffer to 1 MiB (F_SETPIPE_SZ), so a reader or writer on
+// the other end wakes per MiB, not per 64 KiB. Does nothing for anything but
+// a pipe, and ignores failure (the limit is /proc/sys/fs/pipe-max-size).
+void pipeGrow(int fd);
 
 // Wall clock in nanoseconds since the epoch.
 i64 nowNs();
