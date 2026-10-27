@@ -419,25 +419,40 @@ resolves every snapshot and confirms every reference is present.
 
 ## 9. Parallelism, I/O and performance
 
-`create` is a pipeline with bounded memory (~12 MiB of read blocks plus
+`create` is a pipeline with bounded memory (~16 MiB of read blocks plus
 ~65 KiB per job slot, 4 slots per worker):
 
 1. **walk** (main thread): `fdopendir`/`readdir` (getdents64) and `fstatat`
    relative to directory fds, children sorted by name; the files cache is
    applied here.
-2. **readers** (up to 4): claim `(file, offset)` ranges in walk order with the
+2. **readers** (up to 8): claim `(file, offset)` ranges in walk order with the
    next ring slot, `pread` 1 MiB plus the 63 bytes CDC needs before it,
    `posix_fadvise` SEQUENTIAL on open and DONTNEED on each range after reading
    (a backup should not evict everybody else's page cache), `O_NOATIME` when
    permitted (silently dropped after the first EPERM), `openat` relative to a
    cached directory fd. Several readers keep several reads in flight (NVMe
    wants queue depth; many small files want their opens overlapped) and run
-   CDC phase 1 while the block is hot in cache.
+   CDC phase 1 while the block is hot in cache. A reader scans as well as
+   reads, so it keeps less than one read in flight on average: on an NVMe,
+   8 readers made a full backup of a tree of small files 1.3-1.4× faster
+   than 4, and of one big file 1.4× (with the ring grown from 12 to 16
+   blocks to feed them). Without `-j`, readers are min(8, CPUs / 2); with
+   `-j N`, (N + 1) / 2, at most 8. Readers sleep on a disk but are busy on
+   a fast source, so 8 readers plus a worker per CPU oversubscribed a
+   20-CPU machine and cost 8% on tmpfs; the default worker count leaves
+   them room (14 workers: tmpfs back to the old speed, nothing lost on the
+   NVMe; 12 was faster on tmpfs but 10% slower reading the NVMe). A big file is
+   read as 1 MiB ranges handed out in turn, so each reader's descriptor
+   sees a strided pattern; that did not defeat the kernel's readahead
+   (four threads reading 1 MiB ranges in turn from separate descriptors
+   read a cold file within 6% of four contiguous extents), so the ranges
+   stay as they are.
 3. **chunker**: takes blocks strictly in ring order, moves the previous
    block's short tail into the new block's headroom, selects cuts, numbers
    chunks. No file data is copied: jobs point into the blocks, which are
    reference-counted.
-4. **workers** (`-j N`, default: online CPUs): keyed-BLAKE3 ID, dedupe lookup,
+4. **workers** (`-j N`; default: the online CPUs less three quarters of the
+   readers, 14 on 20 CPUs): keyed-BLAKE3 ID, dedupe lookup,
    LZ4, AES-GCM.
 5. **writer** (main thread): takes finished jobs strictly in sequence, drops
    duplicates (first occurrence wins), `writev`s the records straight from the
@@ -454,7 +469,29 @@ would cost size and complexity). Output goes through a 4 MiB buffer or
 `writev`, with EINTR and partial writes handled; SIGPIPE is ignored so a dead
 pipe reader is a reported error and the index is not updated.
 
-`restore`, `check` and `merge` use a thread pool over independent chunk tasks.
+`restore`, `check` and `merge` use a thread pool over independent tasks.
+`restore` and `check` read the backup in **spans**: runs of consecutive
+records (about 256 KiB) read with one `pread` and opened from memory. Each
+task also asks the kernel (`POSIX_FADV_WILLNEED`) for the span about 16 MiB
+ahead, so the disk keeps a deep queue of large reads whatever `-j` is.
+Reading one ~20 KiB record per `pread` from many threads at scattered
+offsets ran at half the disk's sequential speed; spans of 256 KiB measured
+better than 1-2 MiB (less CPU, and more tasks to spread over threads). A
+full backup restores as long runs of consecutive records because the
+snapshot lists chunks in the order `create` wrote them; deduplicated chunks
+and increments break the runs, and a chunk that does not continue the
+current span starts a new one. `merge` still reads one record at a time.
+
+`restore` gathers decoded chunks that continue each other in one output file
+into one `pwrite` (up to 1 MiB) and overlaps two batches of files: the main
+thread creates and sizes the next batch's files (a third of the wall time on
+ext4) while a finisher thread runs the current batch on the pool and then
+sets its files' owner, mode and times. Batches hold up to 4 096 files and
+1 GiB; restore raises the soft descriptor limit towards the hard one for
+that, and uses smaller batches when it cannot. It runs 8 threads unless
+`-j` says otherwise: with the prefetch, 8 read as fast as 20, and 20 threads
+writing into the page cache spent twice the kernel CPU for no gain in wall
+time.
 
 **Files that change underneath.** The backup is of the tree as walked: a file
 is read up to the size the walk saw. One that grew or shrank by the time it
@@ -483,16 +520,18 @@ these are CPU numbers; on disk the readers' queue depth matters instead).
 
 | create (full) | -j 1 | -j 2 | -j 4 | -j 8 | -j 20 |
 |---|---|---|---|---|---|
-| wall time | 0.88 s | 0.70 s | 0.37 s | 0.25 s | 0.33 s |
-| throughput | 1.2 GB/s | 1.5 GB/s | 2.7 GB/s | 4.0 GB/s | 3.1 GB/s |
+| wall time | 0.91 s | 0.78 s | 0.42 s | 0.26 s | 0.29 s |
+| throughput | 1.2 GB/s | 1.4 GB/s | 2.6 GB/s | 4.2 GB/s | 3.7 GB/s |
 
 Beyond ~8 workers the writer's copy into the output file and the E-cores
-flatten the curve.
+flatten the curve. (Median of three runs at commit 47cc455. `-j 20` runs 8
+readers on top of 20 workers; without `-j`, create runs 14 workers on this
+machine for that reason.)
 
 | increment | files cache | no files cache |
 |---|---|---|
-| unchanged tree | 0.035 s, 0 files read, 43 KB | 0.23 s, 1 GiB read, 43 KB |
-| 1% scattered change | 0.17 s, 719 MiB read, 39 MB | 0.23 s, 1 GiB read, 39 MB |
+| unchanged tree | 0.038 s, 0 files read, 44 KB | 0.16 s, 1 GiB read, 44 KB |
+| 1% scattered change | 0.13 s, 719 MiB read, 39 MB | 0.17 s, 1 GiB read, 39 MB |
 
 The 1% change rewrites 4 KiB at ~1 000 random offsets in the large files
 (every one of them is touched, hence 719 MiB still read), appends to every
@@ -500,12 +539,17 @@ log and rewrites 1% of the small files. Each 4 KiB write dirties one or two
 ~20 KiB chunks, so the increment is ~3.6× the bytes changed: that is the
 price of CDC's chunk size, and why SQLite gets page-sized chunks.
 
-restore (full + increment, verified): 0.27 s, 3.7 GB/s; check: 8.5 GB/s;
-merge: 3.0 GB/s.
+restore (full + increment, verified): 0.29 s, 3.7 GB/s; check: 0.09 s,
+12 GB/s (was 8.5); merge: 3.0 GB/s. On tmpfs restore is bound by creating
+and writing the files, so the span reads change its time little but halve
+its CPU. The disk-bound picture, where they matter, is in
+[benchmarks.md](benchmarks.md): from a cold NVMe, check went from 0.97 s to
+0.42 s for a 1.2 GB backup, restore to the same disk from 2.05 s to 1.45 s,
+and create from 2.01 s to 1.69 s.
 
 ## 10. Size
 
-Stripped binary: **234 344 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **238 808 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
@@ -514,9 +558,9 @@ glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 | Argon2id + BLAKE2b (libsodium, ref + SSSE3 + AVX2 + AVX-512F kernels, -O3) | 32 377 |
 | AES-256-GCM (libsodium AES-NI, -O3) | 21 236 |
 | LZ4 (inlined into codecEncode/codecDecode) | 8 510 |
-| bu hot path (-O2) | 4 105 |
-| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 76 967 |
-| crt and runtime glue | 5 203 |
+| bu hot path (-O2) | 4 269 |
+| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 81 028 |
+| crt and runtime glue | 5 277 |
 
 The remaining ~21 KB of the file are ELF headers, dynamic-linking tables
 (`.dynsym`, `.dynstr`, relocations for the ~90 glibc symbols used) and
@@ -527,7 +571,8 @@ The passphrase key file (§3) added 56 KB: 32 KB of Argon2id and BLAKE2b and
 SIMD kernels stay: unlock time is a security parameter, and a faster kernel
 buys more passes or memory in the same two seconds. The security fixes
 after it (safe temp files, restore hardening, escaped listings, warnings)
-added 3 KB of cold code.
+added 3 KB of cold code. The read-path work (spans, prefetch, merged writes
+and the overlapped batches in restore, eight readers in create) added 4.5 KB.
 
 The size rule is "small by default, speed wins on hot paths", so the budget
 went to the SIMD variants: the AVX-512 BLAKE3 kernel alone is 21 KB, and

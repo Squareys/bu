@@ -5,10 +5,11 @@
 // stages connected by bounded rings, so memory is capped no matter how big
 // the tree is:
 //
-//   reader (1 thread)   large sequential read()s (kReadBlock) into a ring of
-//                       kBlocks reused buffers; posix_fadvise SEQUENTIAL before
-//                       and DONTNEED after each file; O_NOATIME when allowed;
-//                       openat relative to a cached directory fd.
+//   readers (up to 8)   1 MiB preads (kReadBlock) into a ring of kBlocks
+//                       reused buffers, CDC phase 1 on each; posix_fadvise
+//                       SEQUENTIAL before and DONTNEED after each range;
+//                       O_NOATIME when allowed; openat relative to a cached
+//                       directory fd.
 //   chunker (1 thread)  moves the previous block's short tail in front of the
 //                       new block and cuts chunks (FastCDC or SQLite pages),
 //                       numbering them 0, 1, 2, ...; jobs point INTO the block.
@@ -61,7 +62,8 @@ namespace bk {
 namespace {
 
 constexpr u32 kReadBlock = 1u << 20;   // one read() per MiB: syscall cost vanishes, and a block stays cache-resident until workers are done with it
-constexpr u32 kBlocks = 12;            // 12 MiB in flight: readers run ahead while workers still read older blocks
+constexpr u32 kBlocks = 16;            // 16 MiB in flight: readers run ahead while workers still read older blocks
+constexpr u32 kMaxReaders = 8;
 constexpr i64 kRaceGuardNs = 1000000000;
 
 // ---- the walk ---------------------------------------------------------------
@@ -391,8 +393,17 @@ void* readerMain(void* arg) {
             off = p.claimOffset;
             len = u32(min<u64>(kReadBlock, size - off));
             flags = u8((off == 0 ? kBlockFirst : 0) | (off + len >= size ? kBlockLast : 0));
-            if (flags & kBlockLast) { ++p.claimItem; p.claimOffset = 0; }
-            else p.claimOffset = off + len;
+            if (flags & kBlockLast) {
+                ++p.claimItem;
+                p.claimOffset = 0;
+                // Nothing left to claim: readers waiting for a free slot must
+                // wake up to see that and exit. The chunker finishes only
+                // when every reader has (readersRunning == 0), so a reader
+                // left asleep here hung the whole backup.
+                if (p.claimItem >= w.reads.count) p.readerCv.broadcast();
+            } else {
+                p.claimOffset = off + len;
+            }
             Block& b = p.blocks[bi];
             b.state = kBlockReading;
             b.item = item;
@@ -607,7 +618,9 @@ void* workerMain(void* arg) {
         j.recLen = recLen;
         j.state = kJobDone;
         Block& b = p.blocks[j.block];
-        if (--b.refs == 0 && b.state == kBlockDraining) { b.state = kBlockFree; p.readerCv.signal(); }
+        // Broadcast, not signal: a woken reader that finds the slot it waits
+        // for still busy goes back to sleep and the wake-up is lost.
+        if (--b.refs == 0 && b.state == kBlockDraining) { b.state = kBlockFree; p.readerCv.broadcast(); }
         if (j.seq == p.written) p.writerCv.signal();
     }
     p.mu.unlock();
@@ -761,7 +774,16 @@ int cmdCreate(int argc, char** argv, int first) {
     }
 
     // ---- pipeline
-    const u32 workers = argsJobs(a);
+    // Threads. With -j N: N workers and (N + 1) / 2 readers, at most 8.
+    // Without: 8 readers (half the CPUs below 16) and the CPUs less three
+    // quarters of the readers as workers. Readers are busy on a fast source
+    // (tmpfs, a warm cache) and asleep on a disk; a worker per CPU on top of
+    // 8 readers oversubscribed a 20-CPU machine and cost 8% on tmpfs, while
+    // 14 workers lost nothing on the NVMe (docs/benchmarks.md).
+    const u32 cpus = cpuCount();
+    const u32 readers = a.jobs ? min<u32>(kMaxReaders, max<u32>(1, (a.jobs + 1) / 2))
+                               : min<u32>(kMaxReaders, max<u32>(1, cpus / 2));
+    const u32 workers = a.jobs ? a.jobs : max<u32>(1, cpus - readers * 3 / 4);
     Pipe p;
     p.walk = &w;
     p.key = &key;
@@ -781,9 +803,12 @@ int cmdCreate(int argc, char** argv, int first) {
     // stays at ~65 KiB per slot (one sealed-record buffer; raw data stays in
     // the read blocks).
     p.slots = workers * 4 + 8;
-    // Readers: enough to keep a few reads in flight and the CDC scan (about a
-    // fifth of the per-byte work) ahead of the workers.
-    const u32 readers = min<u32>(4, max<u32>(1, (workers + 1) / 2));
+    // Readers (computed above): enough to keep reads in flight and the CDC
+    // scan (about a fifth of the per-byte work) ahead of the workers. A
+    // reader spends part of its time scanning, not waiting on the disk, so it
+    // takes more readers than the queue depth the disk wants: on an NVMe, 8
+    // instead of 4 made a full backup of a tree of small files 1.3-1.5x
+    // faster and of one big file 1.4x. More than 8 measured no better.
     const u32 recCap = codecBound(kMaxChunk) + kRecordOverhead;
     Array<u8> jobMem;
     jobMem.resize(p.slots * recCap);

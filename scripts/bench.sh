@@ -98,7 +98,7 @@ echo "  (changed: ~$CHANGE bytes = 1% of $TOTAL)"
 
 echo "== restore (full + increment)"
 S=$(timeit "$BU" restore --key key --passphrase-file pass -C out full-$NPROC.bk inc.bk)
-echo "  -j $NPROC: $S s, $(mbps "$TOTAL" "$S") MiB/s"
+echo "  default -j: $S s, $(mbps "$TOTAL" "$S") MiB/s"
 diff -rq data out/data >/dev/null && echo "  restored tree identical" || { echo "  RESTORE MISMATCH"; exit 1; }
 rm -rf out
 S=$(timeit "$BU" check --key key --passphrase-file pass full-$NPROC.bk inc.bk)

@@ -20,9 +20,9 @@ files and a small local index.
   increments keep working with it.
 - **SQLite-aware.** bu chunks databases at their page size, so an increment
   after scattered updates is about the size of the changed pages.
-- **Fast and multi-threaded.** A parallel pipeline (~4 GB/s create, ~3.7 GB/s
-  verified restore on a laptop, data on tmpfs) whose output does not depend on
-  the thread count.
+- **Fast and multi-threaded.** A parallel pipeline whose output does not
+  depend on the thread count: a full backup takes 2.8× as long as reading
+  the data once (see [Performance](#performance)).
 
 ## Contents
 
@@ -227,8 +227,9 @@ with the merged file.
 | `bu index --key KEYFILE -o INDEX BACKUP...` | Rebuild a lost index, files cache included, from the chain. |
 | `bu help` | Print usage. |
 
-`-j N` sets the worker threads (default: online CPUs); `create` adds up to
-four reader threads, a chunker and a writer. bu refuses unknown, repeated or
+`-j N` sets the worker threads (default: online CPUs; `restore`: at most 8;
+`create`: the CPUs less three quarters of its readers). `create` adds up to
+eight reader threads, a chunker and a writer. bu refuses unknown, repeated or
 malformed options by name.
 
 **Passphrases.** Each command that unlocks the key file (the commands above
@@ -258,32 +259,27 @@ slot's memory free. For a small server, add a slot on the server, or pass
 
 ## Performance
 
-Measured with `scripts/bench.sh` on an Intel i7-12700H (6P+8E cores, 20
-threads, no AVX-512), data on tmpfs, so these are CPU numbers. The tree is
-1 GiB: 40% large random files, 30% text logs, 30% in 3 000 small random files.
-Details and per-primitive numbers:
-[docs/design.md §9](docs/design.md#9-parallelism-io-and-performance).
+**Performance.** On a laptop NVMe (i7-12700H, 1.5 GiB in 23,614 files, cold
+page cache, backup written to the same disk):
 
-| create (full) | -j 1 | -j 2 | -j 4 | -j 8 | -j 20 |
-|---|---|---|---|---|---|
-| wall time | 0.88 s | 0.70 s | 0.37 s | 0.25 s | 0.33 s |
-| throughput | 1.2 GB/s | 1.5 GB/s | 2.7 GB/s | 4.0 GB/s | 3.1 GB/s |
-
-| increment | files cache | no files cache |
+| Run | Time | vs. reading every file once |
 |---|---|---|
-| unchanged tree | 0.035 s, 0 files read, 43 KB | 0.23 s, 1 GiB read, 43 KB |
-| 1% scattered change | 0.17 s, 719 MiB read, 39 MB | 0.23 s, 1 GiB read, 39 MB |
+| Raw read, the ceiling | 0.60 s | 1.0× |
+| `cp -a` to the same disk | 3.97 s | 6.7× |
+| `bu create`, full | 1.69 s | 2.8× |
+| `bu create`, nothing changed | 0.08 s | 0.14× |
+| `bu create`, 1 % of files changed | 0.11 s | 0.18× |
+| `bu restore` / `bu check` | 1.45 s / 0.42 s | 2.4× / 0.71× |
 
-| Other | Result |
-|---|---|
-| restore (full + increment, verified) | 3.7 GB/s |
-| check | 8.5 GB/s |
-| merge | 3.0 GB/s |
-| SQLite increment, 26 MB database, 2% of rows rewritten at random | 0.99 × changed pages |
-
-The 1% scattered change costs ~3.6× the bytes changed, because each 4 KiB
-write dirties one or two ~20 KiB chunks. CDC's chunk size sets that price,
-and it is why SQLite databases get page-sized chunks.
+A backup has to read its data, so the table measures each run against
+reading every file once (8 parallel streams, the fastest plain reader on
+this disk). A full backup takes 2.8× as long as reading the data once,
+with encryption, compression and the write to the same disk included. An
+increment skips each file whose inode, size and mtime match the previous
+backup and reads the rest, so it finishes in under a fifth of one full
+read. [docs/benchmarks.md](docs/benchmarks.md) has the method, the numbers
+before and after this release's read-path work, and the other layouts
+(tmpfs, one big file, `-j 1`).
 
 ## Security
 
@@ -364,7 +360,8 @@ scripts/build.sh Debug --asan    # also: Debug, --asan (ASan + UBSan), --tsan
 scripts/test.sh                  # unit and integration tests
 scripts/test.sh --asan           # the same against a sanitizer build (or --tsan)
 scripts/size_report.sh           # stripped size and a per-component breakdown
-scripts/bench.sh                 # throughput and increment sizes
+scripts/bench.sh                 # throughput and increment sizes (tmpfs)
+scripts/bench_io.sh --src DIR --dst DIR   # against the disk (docs/benchmarks.md)
 ```
 
 The build directory lives outside the tree, in
@@ -378,6 +375,8 @@ test data with `openssl` and skip the SQLite test without the `sqlite3` CLI.
   nonce scheme, manifests, the files cache, merge semantics, the threat
   model, performance and size.
 - [docs/format.md](docs/format.md): the file format, byte by byte.
+- [docs/benchmarks.md](docs/benchmarks.md): bu against the disk, with raw
+  read, raw write and copy baselines.
 - [CHANGELOG.md](CHANGELOG.md)
 
 ## Licence

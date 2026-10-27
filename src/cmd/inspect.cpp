@@ -21,25 +21,56 @@ namespace {
 
 // ---- check ------------------------------------------------------------------
 
+// One task per span of consecutive records (about kSpanBytes, fewer when the
+// backup is small, so every thread gets work): one pread, then each record is
+// authenticated, decoded and hashed from memory.
+struct CheckSpan {
+    u32 file, first, count;
+};
+
 struct CheckCtx {
     const MasterKey* key = nullptr;
     const Chain* chain = nullptr;
-    Array<u64> work;                 // file << 32 | chunk
-    Array<Array<u8>> scratch, raw;   // per worker
+    Array<CheckSpan> work;
+    u32 records = 0;
+    u32 lookahead = 0;
+    Array<Array<u8>> span, payload, raw;   // per worker
     Mutex mu;
     u32 bad = 0;                     // under mu
 };
 
 void checkTask(void* ctx, u32 i, u32 worker) {
     CheckCtx& c = *static_cast<CheckCtx*>(ctx);
-    const u32 f = u32(c.work[i] >> 32), ch = u32(c.work[i]);
-    const Container& file = c.chain->files[f];
+    const CheckSpan& s = c.work[i];
+    const Container& file = c.chain->files[s.file];
+    if (i + c.lookahead < c.work.count) {
+        const CheckSpan& n = c.work[i + c.lookahead];
+        containerPrefetchSpan(c.chain->files[n.file], n.first, n.count);
+    }
     String err;
-    if (containerReadChunk(*c.key, file, file.chunks[ch], c.scratch[worker], c.raw[worker], err)) return;
+    Array<u8>& span = c.span[worker];
+    Array<u8>& raw = c.raw[worker];
+    raw.resize(kMaxChunk);
+    u32 failures = 0;
+    if (!containerReadSpan(file, s.first, s.count, span, err)) {
+        failures = s.count;
+    } else {
+        const u64 base = file.chunks[s.first].offset;
+        for (u32 k = 0; k < s.count; ++k) {
+            const ChunkLoc& loc = file.chunks[s.first + k];
+            String e;
+            if (containerOpenChunk(*c.key, file, loc, span.ptr + (loc.offset - base), c.payload[worker], raw.ptr, e)) continue;
+            Lock l(c.mu);
+            if (c.bad < 20) report(e.view());
+            else if (c.bad == 20) report("(further errors not shown)"_s);
+            ++c.bad;
+        }
+        return;
+    }
     Lock l(c.mu);
     if (c.bad < 20) report(err.view());
     else if (c.bad == 20) report("(further errors not shown)"_s);
-    ++c.bad;
+    c.bad += failures;
 }
 
 void snapLabel(const Snapshot& s, char out[17]) {
@@ -124,11 +155,25 @@ int cmdCheck(int argc, char** argv, int first) {
     CheckCtx c;
     c.key = &key; c.chain = &chain;
     c.mu.init();
-    for (u32 f = 0; f < chain.files.count; ++f)
-        for (u32 ch = 0; ch < chain.files[f].chunks.count; ++ch) c.work.push((u64(f) << 32) | ch);
     ThreadPool pool;
     pool.init(argsJobs(a));
-    c.scratch.resize(pool.threads);
+    u64 total = 0;
+    for (const Container& f : chain.files) total += f.fileSize;
+    const u64 target = containerSpanTarget(total, pool.threads);
+    for (u32 f = 0; f < chain.files.count; ++f) {
+        const Container& file = chain.files[f];
+        u32 ch = 0;
+        while (ch < file.chunks.count) {
+            u32 n = 1;
+            while (ch + n < file.chunks.count && containerSpanBytes(file, ch, n + 1) <= target) ++n;
+            c.work.push(CheckSpan{f, ch, n});
+            ch += n;
+        }
+        c.records += file.chunks.count;
+    }
+    c.lookahead = containerPrefetchTasks(target, pool.threads);
+    c.span.resize(pool.threads);
+    c.payload.resize(pool.threads);
     c.raw.resize(pool.threads);
     pool.run(c.work.count, checkTask, &c);
     pool.shutdown();
@@ -142,7 +187,7 @@ int cmdCheck(int argc, char** argv, int first) {
     }
     if (a.verbose)
         fprintf(stderr, "bu: check ok: %u files, %u chunk records verified, latest snapshot generation %llu\n",
-                chain.files.count, c.work.count, (unsigned long long)chain.snaps[chainLatest(chain)].head.gen);
+                chain.files.count, c.records, (unsigned long long)chain.snaps[chainLatest(chain)].head.gen);
     return kExitOk;
 }
 
