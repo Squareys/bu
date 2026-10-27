@@ -50,14 +50,16 @@ SMALL_BYTES=$((SMALL * MB / NSMALL))
 prand small $((SMALL * MB)) | split -b "$SMALL_BYTES" -a 4 - data/small/f
 TOTAL=$(du -sb data | cut -f1)
 echo "== data set: $(du -sh data | cut -f1) in $(find data -type f | wc -l) files under $W"
-"$BU" keygen > key
+# A cheap key slot (8 MiB, one pass): the unlock is not what is measured.
+printf 'bench passphrase\n' > pass
+"$BU" key init --passphrase-file pass --kdf-memory 8 --kdf-time 1 key 2>/dev/null
 
 mbps() { awk -v b="$1" -v s="$2" 'BEGIN { printf "%.0f", b / s / 1048576 }'; }
 timeit() { local t0 t1; t0=$(date +%s.%N); "$@"; t1=$(date +%s.%N); awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }'; }
 
 echo "== create (full), thread scaling"
 for j in 1 2 4 8 $NPROC; do
-    S=$(timeit sh -c "\"$BU\" create --key key --index-out idx-$j -j $j data > full-$j.bk")
+    S=$(timeit sh -c "\"$BU\" create --key key --passphrase-file pass --index-out idx-$j -j $j data > full-$j.bk")
     echo "  -j $j: $S s, $(mbps "$TOTAL" "$S") MiB/s, backup $(stat -c %s full-$j.bk) bytes"
 done
 cp idx-$NPROC idx
@@ -65,9 +67,9 @@ rm -f full-1.bk full-2.bk full-4.bk full-8.bk
 
 echo "== increment of the UNCHANGED tree"
 sleep 1.1   # past the files-cache race guard
-S=$(timeit sh -c "\"$BU\" create --key key --base idx --index-out idx-u -v data > u.bk 2> u.log")
+S=$(timeit sh -c "\"$BU\" create --key key --passphrase-file pass --base idx --index-out idx-u -v data > u.bk 2> u.log")
 echo "  with files cache:    $S s, increment $(stat -c %s u.bk) bytes  ($(grep -o '[0-9]* files read ([^)]*)' u.log))"
-S=$(timeit sh -c "\"$BU\" create --key key --base idx --index-out idx-u2 --no-files-cache -v data > u2.bk 2> u2.log")
+S=$(timeit sh -c "\"$BU\" create --key key --passphrase-file pass --base idx --index-out idx-u2 --no-files-cache -v data > u2.bk 2> u2.log")
 echo "  without files cache: $S s, increment $(stat -c %s u2.bk) bytes  ($(grep -o '[0-9]* files read ([^)]*)' u2.log))"
 
 echo "== 1% scattered change"
@@ -88,18 +90,18 @@ for f in data/logs/*.log; do echo "2026-10-26T00:00:00 host app[1]: appended" >>
 ls data/small | awk -v n="$NSMALL" 'NR % 100 == 0' | while read -r f; do prand "chg$f" "$SMALL_BYTES" > "data/small/$f"; done
 sleep 1.1
 
-S=$(timeit sh -c "\"$BU\" create --key key --base idx --index-out idx-inc -v data > inc.bk 2> inc.log")
+S=$(timeit sh -c "\"$BU\" create --key key --passphrase-file pass --base idx --index-out idx-inc -v data > inc.bk 2> inc.log")
 echo "  with files cache:    $S s, increment $(stat -c %s inc.bk) bytes  ($(grep -o '[0-9]* files read ([^)]*)' inc.log))"
-S=$(timeit sh -c "\"$BU\" create --key key --base idx --index-out idx-inc2 --no-files-cache -v data > inc2.bk 2> inc2.log")
+S=$(timeit sh -c "\"$BU\" create --key key --passphrase-file pass --base idx --index-out idx-inc2 --no-files-cache -v data > inc2.bk 2> inc2.log")
 echo "  without files cache: $S s, increment $(stat -c %s inc2.bk) bytes  ($(grep -o '[0-9]* files read ([^)]*)' inc2.log))"
 echo "  (changed: ~$CHANGE bytes = 1% of $TOTAL)"
 
 echo "== restore (full + increment)"
-S=$(timeit "$BU" restore --key key -C out full-$NPROC.bk inc.bk)
+S=$(timeit "$BU" restore --key key --passphrase-file pass -C out full-$NPROC.bk inc.bk)
 echo "  -j $NPROC: $S s, $(mbps "$TOTAL" "$S") MiB/s"
 diff -rq data out/data >/dev/null && echo "  restored tree identical" || { echo "  RESTORE MISMATCH"; exit 1; }
 rm -rf out
-S=$(timeit "$BU" check --key key full-$NPROC.bk inc.bk)
+S=$(timeit "$BU" check --key key --passphrase-file pass full-$NPROC.bk inc.bk)
 echo "== check: $S s, $(mbps "$TOTAL" "$S") MiB/s"
-S=$(timeit sh -c "\"$BU\" merge --key key full-$NPROC.bk inc.bk > merged.bk")
+S=$(timeit sh -c "\"$BU\" merge --key key --passphrase-file pass full-$NPROC.bk inc.bk > merged.bk")
 echo "== merge: $S s, $(mbps "$TOTAL" "$S") MiB/s, merged $(stat -c %s merged.bk) bytes"

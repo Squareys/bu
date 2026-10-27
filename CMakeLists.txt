@@ -178,7 +178,10 @@ set(BK_COLD_SOURCES
     src/io/io.cpp
     src/format/container.cpp
     src/format/snapshot.cpp
+    src/format/keyfile.cpp
     src/cmd/args.cpp
+    src/cmd/passphrase.cpp
+    src/cmd/key.cpp
     src/cmd/chain.cpp
     src/cmd/create.cpp
     src/cmd/restore.cpp
@@ -234,6 +237,7 @@ add_executable(bu_tests
     tests/test_codec.cpp
     tests/test_chunker.cpp
     tests/test_format.cpp
+    tests/test_keyfile.cpp
     ${BK_OBJECTS})
 target_include_directories(bu_tests PRIVATE src tests)
 target_compile_options(bu_tests PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})

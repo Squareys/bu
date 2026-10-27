@@ -1,9 +1,9 @@
-# bu
+# bu (backup utility)
 
 **Encrypted, deduplicating, incremental backups as a Unix filter.**
 
 bu is a very lightweight take on what BorgBackup does, in one small native
-binary (~175 KB stripped, Linux x86-64). `create` writes a backup to stdout
+binary (~230 KB stripped, Linux x86-64). `create` writes a backup to stdout
 and never opens a network connection, so where it goes (a file, S3, ssh,
 tape) is your pipe. There is no repository directory and no server: a key
 file, backup files and a small local index are all there is.
@@ -40,8 +40,9 @@ file, backup files and a small local index are all there is.
 ## Quick start
 
 ```sh
-# 1. A key: 32 random bytes. Keep it safe, and NOT next to the backups.
-(umask 077; bu keygen > ~/.bu.key)
+# 1. A key file: a random master key, stored only under your passphrase
+#    (asked twice). Keep a copy of the file somewhere other than the backups.
+bu key init ~/.bu.key
 
 # 2. A full backup, which also writes the index the next increment needs.
 bu create --key ~/.bu.key --index-out data.idx ~/data > full.bk
@@ -60,6 +61,17 @@ bu merge --key ~/.bu.key full.bk inc1.bk > full2.bk && rm full.bk inc1.bk
 bu check --key ~/.bu.key full2.bk inc2.bk               # authenticate everything
 bu list  --key ~/.bu.key full2.bk inc2.bk               # what is in there
 bu index --key ~/.bu.key -o data.idx full2.bk inc2.bk   # lost the index? rebuild it
+```
+
+Every command that takes `--key` asks for the passphrase on the terminal.
+For cron jobs and servers, give it in a file (its first line) or on a file
+descriptor instead:
+
+```sh
+(umask 077; printf '%s\n' 'the passphrase' > /root/.bu-pass)
+bu create --key /root/.bu.key --passphrase-file /root/.bu-pass \
+    --base data.idx --index-out data.idx /srv/data > "/backup/data-$(date +%F).bk"
+bu check --key ~/.bu.key --passphrase-fd 3 full2.bk inc2.bk 3< <(pass show bu)
 ```
 
 Reading commands take the whole chain: the full backup (or merged file) and
@@ -151,7 +163,11 @@ the merged file.
 
 | Command | What it does |
 |---|---|
-| `bu keygen > KEYFILE` | Make a new random key. |
+| `bu key init KEYFILE` | Make a new key file: a random master key in slot 0 under a new passphrase (asked twice). Never overwrites a file. |
+| `bu key add KEYFILE` | Unlock with a passphrase, then add another one in a free slot (8 slots). |
+| `bu key passwd KEYFILE` | Change the passphrase you unlock with. |
+| `bu key remove KEYFILE [--slot N]` | Remove the slot you unlock with, or slot `N`. The last usable slot cannot be removed. |
+| `bu key info KEYFILE` | Show the key ID and each slot's KDF costs; never a secret. |
 | `bu create --key KEYFILE --index-out INDEX [--base INDEX] [-j N] [--no-files-cache] [-v] PATH... > BACKUP` | Stream a backup of `PATH...` to stdout. With `--base`, an increment: only chunks the base index does not list are stored, and files whose metadata is unchanged are not read (`--no-files-cache` reads them anyway). Writes the new index atomically; `--index-out` may name the same file as `--base`. |
 | `bu restore --key KEYFILE [-C DIR] [--path PREFIX] [-j N] [-v] BACKUP...` | Restore the latest snapshot of the chain into `DIR` (default: the current directory), optionally only paths under `PREFIX`. |
 | `bu merge --key KEYFILE [-j N] [-v] BACKUP... > MERGED` | Write one self-contained backup of the chain's latest snapshot, holding only the chunks it references. |
@@ -163,6 +179,23 @@ the merged file.
 `-j N` sets the worker threads (default: online CPUs); `create` adds up to
 four reader threads, a chunker and a writer. Unknown, repeated or malformed
 options are refused by name.
+
+**Passphrases.** Every command that unlocks the key file (all of the above
+with `--key`, and `key add`, `passwd` and `remove`) reads the passphrase from
+`--passphrase-file PATH` (the first line, without its line ending), from
+`--passphrase-fd N` (up to the first newline), or else from the terminal with
+echo off. `key add` and `key passwd` read the new passphrase from
+`--new-passphrase-file` or `--new-passphrase-fd`; `key init` reads its one
+passphrase from `--passphrase-file` or `--passphrase-fd`. Without a terminal
+and without one of these, the command fails and names them.
+
+**KDF costs.** `key init`, `add` and `passwd` time Argon2id on this machine
+and pick the passes so one unlock takes about 2 s, with
+min(1 GiB, RAM/4) of memory. `--kdf-target-ms MS` (100–60000) changes the
+target, `--kdf-memory MIB` (8–4096) fixes the memory, and `--kdf-time PASSES`
+(1–100) fixes the passes and skips the timing. A slot needs its memory free
+on every machine that unlocks it: for a small server, add a slot there, or
+pass `--kdf-memory 256`.
 
 **Exit status**
 
@@ -204,7 +237,8 @@ and why SQLite databases get page-sized chunks.
 ## Security
 
 **Threat model:** an attacker has every backup file and index and can modify,
-delete, reorder, truncate and replay them, but does not have the key file.
+delete, reorder, truncate and replay them, but does not have both the key
+file and a passphrase.
 
 - **Encrypted:** file contents, file names, the directory tree, file sizes,
   timestamps, owners, modes and symlink targets, and which chunks backups
@@ -220,12 +254,26 @@ delete, reorder, truncate and replay them, but does not have the key file.
 - **Not detected:** rollback to an older but valid chain. Keep the index, or
   a list of the expected files, somewhere an attacker cannot write.
 
-**Key handling.** The key file holds the 32-byte master key in plaintext;
-protect it like an SSH private key and store it apart from the backups (bu
-warns when other users can access it). Lose it and every backup is
-unreadable, by design. There is no passphrase support: the key file is the
-only secret. Use one key per data set if files from two chains must not be
-substitutable for each other.
+**Key handling.** It works like LUKS:
+
+- **The master key is random.** `bu key init` draws 32 bytes from the
+  kernel. Nobody types it or sees it, and every backup is encrypted under
+  keys derived from it.
+- **The passphrase only unlocks it.** The key file stores the master key
+  wrapped in up to eight slots, each sealed under a key that Argon2id
+  derives from one passphrase. A stolen key file still needs a passphrase,
+  and each guess costs an Argon2id run (by default ~1 GiB and ~2 s).
+- **Changing a passphrase re-encrypts nothing.** `key passwd`, `add` and
+  `remove` rewrite a 944-byte file; every backup, old and new, opens with any
+  current passphrase.
+- **The key file is as necessary as the passphrase.** Lose every copy of it
+  and the backups are unreadable, passphrase or not. Keep a copy somewhere
+  other than the backups, as you would keep a LUKS header backup. A copy
+  made earlier keeps the passphrases it had: removing one from your working
+  file does not remove it from the copy.
+
+bu warns when other users can read the key file. Use one key per data set if
+files from two chains must not be substitutable for each other.
 
 bu does not roll its own primitives: BLAKE3, AES-256-GCM (libsodium) and LZ4
 are vendored verbatim from upstream, and every composition is documented in
@@ -254,8 +302,8 @@ keeps the index the size of one snapshot and makes merge safe.
 
 ## Building and testing
 
-Needs clang (with lld), CMake ≥ 3.20 and Ninja. The three libraries (BLAKE3,
-LZ4, libsodium's AES-GCM) are vendored in `third_party/`; the binary links
+Needs clang (with lld), CMake ≥ 3.20 and Ninja. The libraries (BLAKE3, LZ4,
+and libsodium's AES-GCM and Argon2id) are vendored in `third_party/`; the binary links
 only against glibc.
 
 ```sh
@@ -275,7 +323,7 @@ CLI.
 
 ## Documentation
 
-- [docs/design.md](docs/design.md): chunking, crypto and the nonce scheme,
+- [docs/design.md](docs/design.md): chunking, crypto, the key file and the nonce scheme,
   manifests, the files cache, merge semantics, the threat model, performance
   and size.
 - [docs/format.md](docs/format.md): the file format, byte by byte.

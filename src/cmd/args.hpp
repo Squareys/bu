@@ -28,7 +28,20 @@ enum ArgFlag : u32 {
     kArgPath = 1u << 6,         // --path PREFIX
     kArgOut = 1u << 7,          // -o FILE
     kArgVerbose = 1u << 8,      // -v
+    kArgPassFile = 1u << 9,     // --passphrase-file FILE
+    kArgPassFd = 1u << 10,      // --passphrase-fd N
+    kArgNewPassFile = 1u << 11, // --new-passphrase-file FILE
+    kArgNewPassFd = 1u << 12,   // --new-passphrase-fd N
+    kArgKdfMemory = 1u << 13,   // --kdf-memory MIB
+    kArgKdfTime = 1u << 14,     // --kdf-time PASSES
+    kArgKdfTargetMs = 1u << 15, // --kdf-target-ms MS
+    kArgSlot = 1u << 16,        // --slot N
 };
+// Every command that unlocks a key file takes both passphrase sources; with
+// neither, it asks on the terminal.
+constexpr u32 kArgPass = kArgPassFile | kArgPassFd;
+constexpr u32 kArgNewPass = kArgNewPassFile | kArgNewPassFd;
+constexpr u32 kArgKdf = kArgKdfMemory | kArgKdfTime | kArgKdfTargetMs;
 
 struct Args {
     const char* key = nullptr;       // each may be null when not given
@@ -37,6 +50,14 @@ struct Args {
     const char* dir = nullptr;
     const char* path = nullptr;
     const char* out = nullptr;
+    const char* passFile = nullptr;
+    const char* newPassFile = nullptr;
+    int passFd = -1;                 // -1 when not given
+    int newPassFd = -1;
+    u32 kdfMemMiB = 0;               // 0 = not given (automatic)
+    u32 kdfPasses = 0;               // 0 = not given (calibrated)
+    u32 kdfTargetMs = 0;             // 0 = not given (the default target)
+    u32 slot = kInvalidIndex;        // kInvalidIndex = not given
     u32 jobs = 0;                    // 0 = online CPU count
     bool noCache = false;
     bool verbose = false;
@@ -44,7 +65,7 @@ struct Args {
 };
 
 // Parse argv[first..argc) for subcommand `cmd`, accepting the options in
-// `allowed`. On a usage error prints "bu CMD: message" and returns false.
+// `allowed` (kArgKey brings kArgPass with it). On a usage error prints "bu CMD: message" and returns false.
 [[nodiscard]] bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, Args& out);
 
 // Print "bu: message" (or "bu CMD: message") to stderr.

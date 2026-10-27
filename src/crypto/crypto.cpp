@@ -129,7 +129,9 @@ bool randomBytes(void* out, usize n, String& err) {
     return true;
 }
 
-void secureZero(void* p, usize n) { explicit_bzero(p, n); }
+// n == 0 may come with a null pointer (an empty Array), which explicit_bzero
+// is declared not to accept.
+void secureZero(void* p, usize n) { if (n) explicit_bzero(p, n); }
 
 void hexEncode(const u8* in, usize n, char* out) {
     static const char kDigits[] = "0123456789abcdef";

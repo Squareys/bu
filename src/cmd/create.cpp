@@ -40,6 +40,7 @@
 #include "chunk/chunker.hpp"
 #include "cmd/args.hpp"
 #include "cmd/commands.hpp"
+#include "cmd/passphrase.hpp"
 #include "core/sort.hpp"
 #include "core/thread.hpp"
 #include "format/codec.hpp"
@@ -706,9 +707,8 @@ int cmdCreate(int argc, char** argv, int first) {
     signal(SIGPIPE, SIG_IGN);
 
     String err;
-    if (!cryptoCpuCheck(err)) { report(err); return kExitRuntime; }
     MasterKey key;
-    if (!keyLoad(a.key, key, err)) { report(err); return kExitRuntime; }
+    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
     // Fail before reading a byte if the index cannot be written: discovering
     // it after streaming a 100 GB backup would leave a backup with no index.
     {

@@ -1,32 +1,85 @@
-# bu file format, version 1
+# bu file format
 
-Three kinds of file: the **key file**, **backup files** and **index files**.
-Backups and indexes share one container format. All integers are
-little-endian unless stated otherwise. `varint` is unsigned LEB128 (7 bits per
-byte, low groups first, at most 10 bytes, the 10th carrying only bit 63);
-`svarint` is a zigzag-encoded signed value in a varint.
+Three kinds of file: the **key file** (key file format 2), and **backup
+files** and **index files** (container format 1). Backups and indexes share
+one container format. All integers are little-endian unless stated
+otherwise. `varint` is unsigned LEB128 (7 bits per byte, low groups first, at
+most 10 bytes, the 10th carrying only bit 63); `svarint` is a zigzag-encoded
+signed value in a varint.
 
-The code that defines each part: `src/format/container.cpp` (container, keys,
-records, trailer), `src/format/codec.cpp` (payloads), `src/format/snapshot.cpp`
-(manifest, index body).
+The code that defines each part: `src/format/keyfile.cpp` (key file),
+`src/format/container.cpp` (container, keys, records, trailer),
+`src/format/codec.cpp` (payloads), `src/format/snapshot.cpp` (manifest, index
+body).
 
-## Key file
+## Key file (format 2)
 
-One line of ASCII:
+The key file holds the 32-byte **master key** `K`, never in the clear: `K` is
+stored only wrapped in up to eight **keyslots**, each sealed under a key that
+Argon2id derives from one passphrase. The file is exactly 944 bytes: a
+48-byte header and eight 112-byte slots. Format 1 (`bu-key-1 <64 hex
+digits>`, a plaintext key) is refused with a message naming it.
 
-```
-bu-key-1 <64 lowercase hex digits>\n
-```
+### Header (48 bytes)
 
-The 32 bytes are the **master key** `K`. It never encrypts anything itself;
-everything is derived from it with BLAKE3 `derive_key` (context strings are
-part of the format and never change within a version):
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `42 55 4b 45 59 0d 0a 1a` (`BUKEY\r\n^Z`) |
+| 8 | 2 | key file format version, `2` |
+| 10 | 2 | number of slots, `8` |
+| 12 | 4 | reserved, `0` |
+| 16 | 16 | key ID: first 16 bytes of `derive_key("bu 2026-10-27 key file key id v2", K)` |
+| 32 | 16 | checksum: first 16 bytes of unkeyed BLAKE3(header[0..32)) |
+
+### Slot (112 bytes, slot *i* at offset 48 + 112·*i*)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | state: `0` empty, `1` passphrase slot |
+| 1 | 1 | KDF: `1` Argon2id v1.3 |
+| 2 | 2 | lanes (Argon2 parallelism), `1` |
+| 4 | 4 | passes (Argon2 time cost *t*), 1 ..= 100 |
+| 8 | 4 | memory (Argon2 memory cost *m*) in KiB, 8 MiB ..= 4 GiB |
+| 12 | 4 | reserved, `0` |
+| 16 | 16 | salt, random per slot write |
+| 32 | 12 | AES-GCM nonce, random per slot write |
+| 44 | 4 | reserved, `0` |
+| 48 | 32 | `K`, encrypted |
+| 80 | 16 | GCM tag |
+| 96 | 16 | checksum: first 16 bytes of unkeyed BLAKE3(slot[0..96)) |
+
+An empty slot is 96 zero bytes followed by their checksum.
+
+**Wrapping.** `KEK = Argon2id(passphrase, salt, t = passes, m = memory,
+p = 1, 32 bytes)` (libsodium `crypto_pwhash_argon2id`, i.e. RFC 9106 with no
+secret and no associated data). `K` is sealed with AES-256-GCM under `KEK`
+with the slot's nonce and **associated data** `header[0..32) ‖ u8 i ‖
+slot[0..48)`: the magic, version and key ID, the slot index, and every
+parameter byte of the slot. The passphrase is the bytes given, without a
+line ending; 1 ..= 1024 bytes.
+
+**Reading.** A reader checks size, magic, version and the header checksum
+(failure: damaged file). A slot whose checksum fails, whose reserved fields
+are not zero, whose KDF or lanes are unknown or whose passes and memory are
+outside the bounds above is *damaged* and skipped without running the KDF.
+Each remaining passphrase slot is tried in order; the first whose tag
+verifies yields `K`, which must reproduce the key ID. If none opens, the
+passphrase is wrong (and the message says so, noting damaged slots that were
+skipped). The checksums are not a security mechanism: an attacker can
+recompute them, and the AEAD is what refuses an edited slot.
+
+**Keys from K.** Everything a backup uses is derived from `K` with BLAKE3
+`derive_key` (context strings are part of the container format and never
+change within a version):
 
 | Key | Derivation | Used for |
 |---|---|---|
 | `K_id` | `derive_key("bu 2026-10-25 chunk id v1", K)` | chunk IDs (keyed BLAKE3) |
 | `K_aes(salt)` | `derive_key("bu 2026-10-25 container aes-256-gcm key v1", K ‖ salt)` | AES-256-GCM key of one container |
 | `K_check(salt)` | `derive_key("bu 2026-10-25 container header check v1", K ‖ salt)` | header check value |
+
+No passphrase or KEK enters this derivation, which is why adding, changing
+or removing a passphrase changes nothing in any backup.
 
 ## Container
 
@@ -193,6 +246,6 @@ it is given and never consults it.
 
 ## Versioning
 
-A reader refuses any version it does not know (header, trailer, manifest and
-index bodies each carry one). Any change to the derivation contexts, the nonce
+A reader refuses any version it does not know (the key file, and the
+container header, trailer, manifest and index bodies each carry one). Any change to the derivation contexts, the nonce
 layout, the associated data or a record body is a new format version.

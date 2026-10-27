@@ -22,6 +22,8 @@
 
 namespace bk {
 
+inline void storeU16LE(u8* p, u16 v) { p[0] = u8(v); p[1] = u8(v >> 8); }
+inline u16 loadU16LE(const u8* p) { return u16(p[0] | (u16(p[1]) << 8)); }
 inline void storeU32LE(u8* p, u32 v) { for (int i = 0; i < 4; ++i) p[i] = u8(v >> (8 * i)); }
 inline void storeU64LE(u8* p, u64 v) { for (int i = 0; i < 8; ++i) p[i] = u8(v >> (8 * i)); }
 inline u32 loadU32LE(const u8* p) { u32 v = 0; for (int i = 3; i >= 0; --i) v = (v << 8) | p[i]; return v; }

@@ -1,4 +1,4 @@
-// inspect.cpp — the read-only and small subcommands: check, index, list, keygen.
+// inspect.cpp — the read-only subcommands: check, index, list.
 //
 // `check` is the one to run from cron. It proves, for the files given, that
 // every record authenticates under the key, that every chunk's content hashes
@@ -9,11 +9,11 @@
 #include "cmd/args.hpp"
 #include "cmd/chain.hpp"
 #include "cmd/commands.hpp"
+#include "cmd/passphrase.hpp"
 #include "core/thread.hpp"
 
 #include <stdio.h>
 #include <time.h>
-#include <unistd.h>
 
 namespace bk {
 
@@ -79,12 +79,6 @@ void printEntries(const Snapshot& s) {
     }
 }
 
-bool loadKey(const Args& a, MasterKey& key) {
-    String err;
-    if (!cryptoCpuCheck(err) || !keyLoad(a.key, key, err)) { report(err); return false; }
-    return true;
-}
-
 } // namespace
 
 int cmdCheck(int argc, char** argv, int first) {
@@ -92,7 +86,7 @@ int cmdCheck(int argc, char** argv, int first) {
     if (!argsParse("check", argc, argv, first, kArgKey | kArgJobs | kArgVerbose, a)) return kExitUsage;
     if (a.positional.count == 0) { fprintf(stderr, "bu check: name the backup files to check\n"); return kExitUsage; }
     MasterKey key;
-    if (!loadKey(a, key)) return kExitRuntime;
+    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
     String err;
     Chain chain;
     if (!chainOpen(key, a.positional, chain, err)) { report(err); fprintf(stderr, "bu: check FAILED\n"); return kExitRuntime; }
@@ -139,7 +133,7 @@ int cmdIndex(int argc, char** argv, int first) {
     if (!a.out) { fprintf(stderr, "bu index: -o INDEX is required\n"); return kExitUsage; }
     if (a.positional.count == 0) { fprintf(stderr, "bu index: name the backup files of the chain\n"); return kExitUsage; }
     MasterKey key;
-    if (!loadKey(a, key)) return kExitRuntime;
+    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
     String err;
     Chain chain;
     if (!chainOpen(key, a.positional, chain, err)) { report(err); return kExitRuntime; }
@@ -180,7 +174,7 @@ int cmdList(int argc, char** argv, int first) {
     if (!argsParse("list", argc, argv, first, kArgKey, a)) return kExitUsage;
     if (a.positional.count == 0) { fprintf(stderr, "bu list: name backup files (or one index file)\n"); return kExitUsage; }
     MasterKey key;
-    if (!loadKey(a, key)) return kExitRuntime;
+    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
     String err;
 
     // An index file on its own: show its snapshot and where its chunks live.
@@ -243,20 +237,6 @@ int cmdList(int argc, char** argv, int first) {
     }
     if (!chainResolve(chain, latest, err)) { report(err); return kExitRuntime; }
     printEntries(chain.snaps[latest].snap);
-    return kExitOk;
-}
-
-int cmdKeygen(int argc, char** argv, int first) {
-    Args a;
-    if (!argsParse("keygen", argc, argv, first, 0, a)) return kExitUsage;
-    if (a.positional.count) { fprintf(stderr, "bu keygen: takes no arguments (the key goes to stdout)\n"); return kExitUsage; }
-    String key, err;
-    if (!keyGenerate(key, err)) { report(err); return kExitRuntime; }
-    const bool ok = writeAll(1, key.ptr, key.count);
-    secureZero(key.ptr, key.count);
-    if (!ok) { report("writing the key failed"_s); return kExitRuntime; }
-    if (isatty(1))
-        fprintf(stderr, "bu: that key is the only way to read your backups; store it somewhere other than them\n");
     return kExitOk;
 }
 

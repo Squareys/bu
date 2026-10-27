@@ -8,11 +8,28 @@ own version number (docs/format.md); a release that changes it says so.
 ## [Unreleased]
 
 ### Changed
+- **Key file format 2: a random master key in passphrase keyslots (the LUKS
+  design).** `bu key init KEYFILE` draws the 32-byte master key from
+  getrandom and stores it only wrapped in one of eight slots, each sealed
+  with AES-256-GCM under a key Argon2id stretches from a passphrase (memory
+  min(1 GiB, RAM/4), passes calibrated to ~2 s per unlock; `--kdf-memory`,
+  `--kdf-time`, `--kdf-target-ms`). `bu key add`, `passwd`, `remove`
+  (`--slot N`; the last usable slot is refused) and `info` manage the slots.
+  Every command that takes `--key` now asks for the passphrase on the
+  terminal (echo off), or reads it from `--passphrase-file PATH` or
+  `--passphrase-fd N` for unattended runs. The backup and index format is
+  unchanged: everything is still derived from the master key.
+- `bu keygen` and the plaintext `bu-key-1` key file are gone; such a file is
+  refused with a message naming the format.
+- A damaged key slot is reported as damaged and skipped; a wrong passphrase
+  as a wrong passphrase.
 - Renamed the project from backu to bu: binary, help text, message prefixes,
   key-file prefix (`bu-key-1`), build directory and environment variables
   (`BU_BUILD_ROOT`). The file magic (`BUBAK\r\n^Z`) and the BLAKE3
   `derive_key` contexts now name bu, so files and keys made before the rename
   are not readable; the format version stays 1 (no backups existed yet).
+- Binary size 174 768 → 231 216 bytes (Argon2id and BLAKE2b from libsodium
+  1.0.22, the key file and the `bu key` commands).
 - Licensing spelled out in the README: bu is MIT (`LICENSE`); vendored BLAKE3
   (CC0-1.0 / Apache-2.0), LZ4 (BSD-2-Clause) and libsodium (ISC) keep their
   own licences.

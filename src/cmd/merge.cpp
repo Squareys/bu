@@ -24,6 +24,7 @@
 #include "cmd/args.hpp"
 #include "cmd/chain.hpp"
 #include "cmd/commands.hpp"
+#include "cmd/passphrase.hpp"
 #include "core/thread.hpp"
 
 #include <errno.h>
@@ -82,9 +83,8 @@ int cmdMerge(int argc, char** argv, int first) {
     signal(SIGPIPE, SIG_IGN);
 
     String err;
-    if (!cryptoCpuCheck(err)) { report(err); return kExitRuntime; }
     MasterKey key;
-    if (!keyLoad(a.key, key, err)) { report(err); return kExitRuntime; }
+    if (!unlockKeyForCommand(a, key)) return kExitRuntime;
     Chain chain;
     if (!chainOpen(key, a.positional, chain, err)) { report(err); return kExitRuntime; }
     const u32 latest = chainLatest(chain);

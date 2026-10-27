@@ -29,8 +29,6 @@ constexpr StringView kCtxChunkId = "bu 2026-10-25 chunk id v1"_s;
 constexpr StringView kCtxAead = "bu 2026-10-25 container aes-256-gcm key v1"_s;
 constexpr StringView kCtxCheck = "bu 2026-10-25 container header check v1"_s;
 
-constexpr StringView kKeyPrefix = "bu-key-1 "_s;
-
 void nonceOf(u64 counter, u8 out[kNonceBytes]) {
     storeU64LE(out, counter);
     out[8] = out[9] = out[10] = out[11] = 0;
@@ -49,35 +47,9 @@ bool fail(String& err, const Container& c, StringView what) {
 
 // ---- keys -----------------------------------------------------------------
 
-bool keyLoad(const char* path, MasterKey& out, String& err) {
-    Array<u8> text;
-    if (!readWholeFile(path, 4096, text, err)) return false;
-    // Like ssh with a private key: say so when others can read it. A warning,
-    // not a refusal — a key on a read-only medium or in a container may have
-    // modes the user cannot change, and refusing would not make it secret.
-    struct stat st;
-    if (stat(path, &st) == 0 && (st.st_mode & 077))
-        fprintf(stderr, "bu: warning: key file %s is accessible by other users (chmod 600 it)\n", path);
-    StringView s(reinterpret_cast<const char*>(text.ptr), text.count);
-    while (!s.empty() && (s[s.count - 1] == '\n' || s[s.count - 1] == '\r')) s.count--;
-    const bool ok = s.startsWith(kKeyPrefix) && hexDecode(s.from(kKeyPrefix.count), out.master.b, kKeyBytes);
-    secureZero(text.ptr, text.count);
-    if (!ok) return errSet(err, path, ": not a bu key file (expected one line: bu-key-1 <64 hex digits>)");
-    blake3DeriveKey(kCtxChunkId, out.master.b, kKeyBytes, out.idKey);
-    return true;
-}
-
-bool keyGenerate(String& out, String& err) {
-    Key k;
-    if (!randomBytes(k.b, kKeyBytes, err)) return false;
-    char hex[2 * kKeyBytes];
-    hexEncode(k.b, kKeyBytes, hex);
-    out.assign(kKeyPrefix);
-    out.append(StringView(hex, sizeof hex));
-    out.append('\n');
-    secureZero(k.b, kKeyBytes);
-    secureZero(hex, sizeof hex);
-    return true;
+void masterKeyInit(const Key& master, MasterKey& out) {
+    out.master = master;
+    blake3DeriveKey(kCtxChunkId, master.b, kKeyBytes, out.idKey);
 }
 
 void chunkIdOf(const MasterKey& k, const u8* data, usize n, ChunkId& out) {

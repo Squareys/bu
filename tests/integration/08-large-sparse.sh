@@ -10,11 +10,11 @@ printf 'start' | dd of=src/big.img bs=1 seek=0 conv=notrunc status=none
 printf 'past4G' | dd of=src/big.img bs=1 seek=$((4 * 1024 * 1024 * 1024 + 12345)) conv=notrunc status=none
 printf 'end' | dd of=src/big.img bs=1 seek=$((5 * 1024 * 1024 * 1024 - 3)) conv=notrunc status=none
 
-"$BU" create --key key --index-out idx src > b.bk
+"$BU" create --key key --passphrase-file pass --index-out idx src > b.bk
 B=$(size_of b.bk)
 note "5 GiB sparse file -> $B byte backup"
 assert_between "$B" 1000 4000000 "backup of a sparse 5 GiB file"
-rm -rf out && "$BU" restore --key key -C out b.bk
+rm -rf out && "$BU" restore --key key --passphrase-file pass -C out b.bk
 [ "$(size_of out/src/big.img)" = $((5 * 1024 * 1024 * 1024)) ] || fail "restored size"
 cmp out/src/big.img src/big.img || fail "restored content differs"
 USED=$(du -k out/src/big.img | cut -f1)

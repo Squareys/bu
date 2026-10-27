@@ -11,6 +11,6 @@ int cmdMerge(int argc, char** argv, int first);
 int cmdCheck(int argc, char** argv, int first);
 int cmdIndex(int argc, char** argv, int first);
 int cmdList(int argc, char** argv, int first);
-int cmdKeygen(int argc, char** argv, int first);
+int cmdKey(int argc, char** argv, int first);
 
 } // namespace bk

@@ -9,7 +9,8 @@ layout is in [format.md](format.md).
 
 There are three kinds of file:
 
-- the **key file**: 32 random bytes, the only secret;
+- the **key file**: a random 32-byte master key, stored only wrapped under
+  one or more passphrases (§3, *The key file*);
 - **backup files**: one per `create` (or `merge`), written to stdout;
 - the **index**: a small local file describing the latest snapshot, which the
   next `create` needs instead of the previous backup.
@@ -86,6 +87,7 @@ be corrupt in ways no backup tool can see).
 | chunk IDs, subkeys, header check | BLAKE3 (keyed, derive_key) | official C, SSE4.1/AVX2/AVX-512, runtime dispatch |
 | encryption + authentication | AES-256-GCM | libsodium's AES-NI + PCLMULQDQ implementation |
 | compression | LZ4 block | official lz4.c |
+| passphrase stretching (key file) | Argon2id (RFC 9106) | libsodium's, SSSE3/AVX2/AVX-512F, runtime dispatch |
 | randomness | `getrandom(2)` | kernel |
 
 **Why BLAKE3:** one primitive with a keyed mode (chunk IDs as a MAC, like
@@ -154,6 +156,112 @@ chunk by ID from whichever file has it.
 The **header check** (keyed BLAKE3 of the header under a salt-derived key)
 distinguishes "wrong key" from "damaged file" before any decryption, and
 authenticates the version and kind fields.
+
+### The key file
+
+The design is LUKS's: a **random master key** `K` that nobody types or sees,
+stored only **wrapped in keyslots**, each slot unlocked by one passphrase
+stretched with Argon2id. `bu key init` draws `K` from `getrandom` and seals it
+into slot 0; `key add`, `key passwd` and `key remove` edit slots around the
+same `K` after unlocking with an existing passphrase; every command that
+takes `--key` unlocks the file first. Byte layout: [format.md](format.md#key-file-format-2).
+
+Everything in a backup is derived from `K` and nothing from a passphrase, so
+the backup format did not change when the key file did, and changing a
+passphrase re-encrypts nothing: it rewrites one 112-byte slot. The other side
+of the same coin: the key file is as necessary as the passphrase. Lose every
+copy of it and the passphrase alone opens nothing, exactly as with a LUKS
+header.
+
+**A slot.** `KEK = Argon2id(passphrase, salt, t, m, p = 1)`; `K` is sealed
+with AES-256-GCM under `KEK`, a random nonce, and associated data covering
+the file header (magic, version, key ID), the slot index and every parameter
+byte of the slot. Salt and nonce are fresh on every slot write, so each KEK
+seals exactly one message and nonce reuse cannot arise. Binding the index and
+the header means a slot cannot be moved to another position or spliced into
+another key file; binding the parameters means they cannot be edited (a
+lowered cost would change the KEK anyway, but the AEAD makes it a rule rather
+than a consequence). AES-GCM is reused because it is already in the binary
+and already tested; a dedicated key-wrap mode (AES-KW, RFC 3394) would add a
+primitive for no property this construction lacks, since the KEK is unique
+per slot write.
+
+**Wrong passphrase or damage.** Each slot and the header carry an unkeyed
+16-byte BLAKE3 checksum. A slot whose checksum fails is reported as damaged
+and skipped, without making the other slots unusable; only when every intact
+slot fails authentication is the answer "wrong passphrase". The checksums
+detect accidents, not attacks: an attacker can recompute them, and then the
+AEAD refuses the slot (reported as a wrong passphrase, which is the honest
+answer: no slot opens). After unwrapping, `K` must reproduce the header's key
+ID, a `derive_key` output that `bu key info` also shows as a fingerprint.
+
+**Eight slots.** LUKS2 has 32, sized for multi-user disks and recovery
+schemes. A backup key needs one passphrase for the owner, one for a
+recovery copy, perhaps one per unattended host: eight covers that with room,
+keeps the file a fixed 944 bytes (one parser, no counts to validate), and
+bounds the worst case of a wrong passphrase, which runs the KDF once per
+used slot.
+
+**KDF costs.** Argon2id with one lane (libsodium's implementation is
+single-threaded). Defaults follow cryptsetup's LUKS2 policy: memory is
+min(1 GiB, a quarter of physical RAM); the passes are then **calibrated at
+slot creation** so one unlock takes about 2 s on the machine that writes the
+slot. Calibration times a one-pass and a two-pass run to separate the fixed
+cost (mapping and touching the memory) from the per-pass cost. With automatic
+memory, if three passes (RFC 9106's second recommended option) would not fit
+the target, the memory is halved first, down to 64 MiB. Measured here
+(i7-12700H, AVX2 kernel): a one-pass run at 1 GiB takes 0.36 s, mapping
+included; calibration chose 1 GiB and 6-7 passes; `bu key init` took 3.0 s
+(calibration included) and every unlock 2.1 s with 1 GiB resident.
+Parameters are stored per slot, so a slot made on a laptop and one made on a
+small server can coexist, and `key passwd` re-calibrates. `--kdf-memory`
+(8–4096 MiB), `--kdf-time` (1–100 passes, skips calibration) and
+`--kdf-target-ms` (100–60000) override; values outside the bounds are
+refused, never clamped, and a slot read from disk with parameters outside
+them is treated as damaged, so a tampered file cannot make bu allocate
+terabytes. libsodium's MODERATE preset (256 MiB, 3 passes) was the fixed
+alternative; calibration was chosen because a fixed cost is too slow on a
+small ARM board and needlessly weak on a workstation. The price: a slot
+made on a fast machine unlocks proportionally slower on a slow one, and a
+1 GiB slot cannot be opened on a host with less free memory; such hosts
+want their own slot, added there or with `--kdf-memory`.
+
+**Unattended runs.** Cron and server backups read the passphrase from
+`--passphrase-file PATH` (its first line) or `--passphrase-fd N`; there is no
+raw-key slot type. One slot type keeps one code path and one thing to audit;
+a raw-key slot would amount to a second plaintext key file under another
+name, while a passphrase file on a server is the same exposure with the
+Argon2 cost still in front of offline guessing, and can be root-only or
+supplied by a secret manager through a descriptor. Interactively the
+passphrase is read from `/dev/tty` with echo off (stdin and stdout carry
+backup data), never from an environment variable (visible in
+`/proc/PID/environ`, inherited by children) or an argument (visible in `ps`).
+Without a terminal or a source the command fails and names the flags.
+
+**Memory hygiene.** The passphrase, the KEK and its AES schedule, and `K` are
+wiped (`explicit_bzero`) on every path once used; `MasterKey` wipes itself on
+destruction. `mlock` is not used: `K` lives for the whole run and is
+expanded into per-container AES schedules on every worker thread, so locking
+only the passphrase buffer would protect the least valuable secret, and
+locking all of it would need more than the default `RLIMIT_MEMLOCK`. Swap is
+the swap's to encrypt.
+
+**Rejected.**
+
+- *A plaintext key file* (bu's first format, `bu-key-1 <hex>`): one stolen
+  file reads every backup, with no second factor, and there is no way to
+  rotate access without re-encrypting everything.
+- *The master key derived directly from the passphrase* (`K = KDF(pw)`):
+  changing the passphrase would change `K` and orphan every existing backup
+  (or force re-encryption of all of them), there could be only one
+  passphrase, and the KDF salt would have to live somewhere anyway. The
+  keyslot indirection costs 944 bytes.
+- *A raw-key slot for automation*: see above.
+- *Public-key recipients* (RSA or X25519 slots, as in age): would let a
+  machine write backups that only an offline key can read. A sound later
+  feature, as another slot type sealing `K` to a public key; it needs a
+  second primitive and a different trust story, and nothing in the slot
+  layout precludes it (the state and KDF bytes are there to grow).
 
 ## 4. Compression
 
@@ -350,21 +458,27 @@ merge: 3.0 GB/s.
 
 ## 10. Size
 
-Stripped binary: **174 768 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **231 216 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
 |---|---|
 | BLAKE3 (portable + SSE4.1 + AVX2 + AVX-512, -O3) | 64 114 |
-| AES-256-GCM (libsodium AES-NI, -O3) | 21 104 |
+| Argon2id + BLAKE2b (libsodium, ref + SSSE3 + AVX2 + AVX-512F kernels, -O3) | 32 377 |
+| AES-256-GCM (libsodium AES-NI, -O3) | 21 236 |
 | LZ4 (inlined into codecEncode/codecDecode) | 8 768 |
-| bu hot path (-O2) | 4 078 |
-| bu cold path: CLI, walk, pipeline, manifest, restore, merge (-Oz) | 56 108 |
-| crt and runtime glue | 3 962 |
+| bu hot path (-O2) | 4 105 |
+| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 74 599 |
+| crt and runtime glue | 5 203 |
 
-The remaining ~17 KB of the file are ELF headers, dynamic-linking tables
-(`.dynsym`, `.dynstr`, relocations for the ~80 glibc symbols used) and
+The remaining ~21 KB of the file are ELF headers, dynamic-linking tables
+(`.dynsym`, `.dynstr`, relocations for the ~90 glibc symbols used) and
 section alignment.
+
+The passphrase key file (§3) added 56 KB: 32 KB of Argon2id and BLAKE2b and
+18 KB of key-file, passphrase and `bu key` code and help text. The Argon2
+SIMD kernels stay: unlock time is a security parameter, and a faster kernel
+buys more passes or memory in the same two seconds.
 
 The size rule is "small by default, speed wins on hot paths", so the budget
 went to the SIMD variants: the AVX-512 BLAKE3 kernel alone is 21 KB, and
@@ -382,7 +496,9 @@ The "well below 100 KB" target is not met: the vendored hot code alone is
 ## 11. Threat model
 
 **Assumed:** the attacker has every backup file and index, can modify,
-delete, reorder, truncate and replay them, and does not have the key file.
+delete, reorder, truncate and replay them, and does not have both the key
+file and one of its passphrases (having one without the other: see the key
+file paragraph below).
 
 **What they learn:**
 
@@ -419,8 +535,14 @@ records would blunt both at a cost in size; bu does not pad.
   internally consistent, so this is detected only where snapshot IDs or
   chunks do not line up. Use one key per data set if that matters.
 
-The key file is stored in plaintext; protect it like an SSH private key.
-Losing it makes every backup unreadable, by design.
+**The key file** holds `K` only wrapped under passphrases (§3). Someone who
+steals it still needs a passphrase, and can only guess offline at the cost of
+one Argon2id run (by default 1 GiB and ~2 s here) per guess per slot; a
+strong passphrase is what makes that infeasible. Someone who has a
+passphrase but no copy of the key file has nothing. Losing every copy of the
+key file makes every backup unreadable, by design. Removing a passphrase
+edits one copy of the file: an older copy still accepts it, as an old LUKS
+header backup does.
 
 ## 12. Deliberate omissions
 

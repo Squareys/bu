@@ -19,9 +19,18 @@ namespace {
 const char kHelp[] =
 "bu " BU_VERSION " — backup utility: encrypted, deduplicating, incremental backups as a Unix filter\n"
 "\n"
-"  bu keygen > KEYFILE\n"
-"      Make a new random key. Keep it away from the backups: without it they\n"
-"      cannot be read, by anybody.\n"
+"  bu key init KEYFILE\n"
+"      Make a new key file: a random master key, stored only wrapped under a\n"
+"      passphrase (asked twice). Keep a copy of the file away from the\n"
+"      backups: they need the file AND a passphrase.\n"
+"  bu key add KEYFILE        add a passphrase (up to 8)\n"
+"  bu key passwd KEYFILE     change the passphrase you unlock with\n"
+"  bu key remove KEYFILE [--slot N]\n"
+"                            remove the slot you unlock with, or slot N\n"
+"  bu key info KEYFILE       list the slots and their KDF costs\n"
+"      init, add and passwd take --kdf-memory MIB (8-4096), --kdf-time PASSES\n"
+"      (1-100) or --kdf-target-ms MS (100-60000, default 2000: the passes are\n"
+"      calibrated so one unlock takes about that long here).\n"
 "\n"
 "  bu create --key KEYFILE --index-out INDEX [--base INDEX] [-j N]\n"
 "               [--no-files-cache] [-v] PATH... > BACKUP\n"
@@ -50,6 +59,13 @@ const char kHelp[] =
 "  bu list --key KEYFILE BACKUP... | INDEX\n"
 "      Show the files, and the latest snapshot's tree.\n"
 "\n"
+"Every command that unlocks a key file (--key, and key add/passwd/remove)\n"
+"asks for the passphrase on the terminal, or reads it from\n"
+"--passphrase-file PATH (its first line) or --passphrase-fd N, for\n"
+"unattended runs; key add and passwd read the new one from\n"
+"--new-passphrase-file PATH or --new-passphrase-fd N (key init: from\n"
+"--passphrase-file or --passphrase-fd).\n"
+"\n"
 "-j N sets the worker threads (default: online CPUs); create adds up to four\n"
 "reader threads, a chunker and a writer. Exit status: 0 ok; 1 failure, or\n"
 "create finished with warnings (unreadable files were left out; the backup\n"
@@ -57,7 +73,7 @@ const char kHelp[] =
 "\n"
 "Example (to S3, keeping the index only when the upload succeeded):\n"
 "  set -o pipefail\n"
-"  bu create --key k --base idx --index-out idx.new ~/data \\\n"
+"  bu create --key k --passphrase-file ~/.bu-pass --base idx --index-out idx.new ~/data \\\n"
 "      | aws s3 cp - s3://bucket/data-$(date +%F).bk && mv idx.new idx\n";
 
 } // namespace
@@ -71,7 +87,7 @@ int main(int argc, char** argv) {
     if (cmd == "check"_s) return cmdCheck(argc, argv, 2);
     if (cmd == "index"_s) return cmdIndex(argc, argv, 2);
     if (cmd == "list"_s) return cmdList(argc, argv, 2);
-    if (cmd == "keygen"_s) return cmdKeygen(argc, argv, 2);
+    if (cmd == "key"_s) return cmdKey(argc, argv, 2);
     if (cmd == "help"_s || cmd == "--help"_s || cmd == "-h"_s) { fputs(kHelp, stdout); return kExitOk; }
     if (cmd == "version"_s || cmd == "--version"_s) { puts("bu " BU_VERSION); return kExitOk; }
     fprintf(stderr, "bu: unknown command '%s' (run `bu help`)\n", argv[1]);

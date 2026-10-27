@@ -61,15 +61,17 @@ constexpr u64 kNonceManifest = kNonceMetaBase + 0;
 constexpr u64 kNonceTrailer = kNonceMetaBase + 1;
 constexpr u64 kNonceIndex = kNonceMetaBase + 2;
 
+// The master key K and what every backup derives from it. K comes out of a
+// key file's slot (format/keyfile.hpp); nothing here knows about passphrases.
+// Wiped when it goes out of scope, whichever way a command exits.
 struct MasterKey {
     Key master;
     Key idKey;        // derived: keyed-BLAKE3 key for chunk IDs
+    ~MasterKey() { secureZero(this, sizeof *this); }
 };
 
-// Parse a key file ("bu-key-1 <64 hex digits>\n"); derives idKey.
-[[nodiscard]] bool keyLoad(const char* path, MasterKey& out, String& err);
-// A fresh key file's text.
-[[nodiscard]] bool keyGenerate(String& out, String& err);
+// Set out.master = master and derive idKey.
+void masterKeyInit(const Key& master, MasterKey& out);
 
 // The chunk ID: keyed BLAKE3 of the raw chunk, truncated to 128 bits.
 void chunkIdOf(const MasterKey& k, const u8* data, usize n, ChunkId& out);
