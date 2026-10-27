@@ -9,7 +9,10 @@ Everything here is third-party source compiled into bu. Rules:
   * Each library is its own CMake object library built with -w and its own
     flags (-O3; see CMakeLists.txt). Our warnings and no-STL rules apply to
     src/, not to vendored C.
-  * Permissive licences only. Each library's licence file sits beside it.
+  * Permissive licences only. Each library's licence file sits beside it,
+    and THIRD_PARTY_NOTICES at the top of the tree collects the licence
+    texts that ship with a binary. Update it when a library is added or its
+    licence file changes.
   * Each header is included by exactly one bu translation unit (named
     below), so replacing a library is a one-file change.
   * Record the exact version, the URL of the release artifact and its sha256,
@@ -18,7 +21,8 @@ Everything here is third-party source compiled into bu. Rules:
 Inventory
 ---------
 
-BLAKE3  1.8.7  —  CC0-1.0 OR Apache-2.0 (OR Apache-2.0 WITH LLVM-exception)
+BLAKE3  1.8.7  —  CC0-1.0 OR Apache-2.0 (OR Apache-2.0 WITH LLVM-exception);
+                   bu uses it under CC0-1.0
     Upstream: https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.8.7.tar.gz
     sha256:   c6782a28842b1c0478524ac06a4f2ede784038ee298d6e2162c0b089c4306a3c
     Files:    blake3/{blake3.c,blake3.h,blake3_impl.h,blake3_dispatch.c,
@@ -48,8 +52,9 @@ LZ4  1.10.0  —  BSD-2-Clause (lib/ only)
               (~700 MB/s per core compressing, several GB/s decompressing),
               with a bounds-checked decoder.
 
-libsodium  1.0.22  —  ISC (Argon2 files: CC0-1.0 / Apache-2.0 per their headers,
-                         redistributed under libsodium's ISC terms)
+libsodium  1.0.22  —  ISC; the Argon2 files (argon2/) and the BLAKE2b
+                         reference files (blake2b/) are used under CC0-1.0,
+                         as their headers allow (CC0 text: blake3/LICENSE_CC0)
     Upstream: https://github.com/jedisct1/libsodium/releases/download/1.0.22-RELEASE/libsodium-1.0.22.tar.gz
     sha256:   adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349
     Files (paths after "=" are upstream's, under src/libsodium/; every file

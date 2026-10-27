@@ -446,4 +446,6 @@ MIT, copyright (c) 2026 Jonathan Hale; see [LICENSE](LICENSE). Vendored code in
 `third_party/` keeps its own licence, with the licence file beside it: BLAKE3
 1.8.7 (CC0-1.0, or Apache-2.0, or Apache-2.0 WITH LLVM-exception), LZ4 1.10.0
 (BSD-2-Clause), libsodium 1.0.22 (ISC). A binary contains code from all three,
-so keep their notices with it. Details: [third_party/README](third_party/README).
+so keep their notices with it: [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) holds
+them, and every release ships it next to the binary. Details:
+[third_party/README](third_party/README).
