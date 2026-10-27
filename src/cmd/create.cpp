@@ -393,8 +393,17 @@ void* readerMain(void* arg) {
             off = p.claimOffset;
             len = u32(min<u64>(kReadBlock, size - off));
             flags = u8((off == 0 ? kBlockFirst : 0) | (off + len >= size ? kBlockLast : 0));
-            if (flags & kBlockLast) { ++p.claimItem; p.claimOffset = 0; }
-            else p.claimOffset = off + len;
+            if (flags & kBlockLast) {
+                ++p.claimItem;
+                p.claimOffset = 0;
+                // Nothing left to claim: readers waiting for a free slot must
+                // wake up to see that and exit. The chunker finishes only
+                // when every reader has (readersRunning == 0), so a reader
+                // left asleep here hung the whole backup.
+                if (p.claimItem >= w.reads.count) p.readerCv.broadcast();
+            } else {
+                p.claimOffset = off + len;
+            }
             Block& b = p.blocks[bi];
             b.state = kBlockReading;
             b.item = item;
@@ -609,7 +618,9 @@ void* workerMain(void* arg) {
         j.recLen = recLen;
         j.state = kJobDone;
         Block& b = p.blocks[j.block];
-        if (--b.refs == 0 && b.state == kBlockDraining) { b.state = kBlockFree; p.readerCv.signal(); }
+        // Broadcast, not signal: a woken reader that finds the slot it waits
+        // for still busy goes back to sleep and the wake-up is lost.
+        if (--b.refs == 0 && b.state == kBlockDraining) { b.state = kBlockFree; p.readerCv.broadcast(); }
         if (j.seq == p.written) p.writerCv.signal();
     }
     p.mu.unlock();

@@ -44,6 +44,12 @@ own version number (docs/format.md); a release that changes it says so.
   per container (not one per thread).
 - Binary size 231 232 → 234 344 bytes.
 
+### Fixed
+- `bu create` could hang forever at the end of the file list: readers
+  waiting for a free read slot were woken one at a time and not at all when
+  the last range was claimed, and the chunker waits for every reader to
+  exit. Seen in about 2% of runs with 4 readers on a few CPUs, 7% with 8.
+
 ### Performance
 - `bu restore` and `bu check` read the backup in spans of consecutive
   records (about 256 KiB per `pread`) and prefetch about 16 MiB ahead,
