@@ -1,11 +1,18 @@
 # Changelog
 
-All notable changes to backu are documented here. The format follows
+All notable changes to bu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 uses [Semantic Versioning](https://semver.org/). The on-disk format has its
 own version number (docs/format.md); a release that changes it says so.
 
 ## [Unreleased]
+
+### Changed
+- Renamed the project from backu to bu: binary, help text, message prefixes,
+  key-file prefix (`bu-key-1`), build directory and environment variables
+  (`BU_BUILD_ROOT`). The file magic (`BUBAK\r\n^Z`) and the BLAKE3
+  `derive_key` contexts now name bu, so files and keys made before the rename
+  are not readable; the format version stays 1 (no backups existed yet).
 
 ## [0.1.0] — 2026-10-25
 

@@ -1,6 +1,6 @@
 // string_view.hpp — zero-copy, non-owning view over bytes.
 //
-// The universal string-passing type in backu: argv, paths, manifest names,
+// The universal string-passing type in bu: argv, paths, manifest names,
 // error messages. It never allocates and is not guaranteed NUL-terminated, so
 // the length always travels with the pointer. Deliberately minimal: no SIMD
 // `find` and no UTF-8 helpers, because nothing in a backup tool scans

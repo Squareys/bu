@@ -7,7 +7,7 @@ stages: [test]
   before_script:
     - pacman -Syu --noconfirm clang lld cmake ninja openssl sqlite python util-linux
   variables:
-    BACKU_BUILD_ROOT: "$CI_PROJECT_DIR/.build"
+    BU_BUILD_ROOT: "$CI_PROJECT_DIR/.build"
 
 test:
   extends: .base

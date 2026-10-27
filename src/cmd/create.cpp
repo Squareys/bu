@@ -1,4 +1,4 @@
-// create.cpp — `backu create`: walk, read, chunk, dedupe, compress, encrypt,
+// create.cpp — `bu create`: walk, read, chunk, dedupe, compress, encrypt,
 // stream to stdout; then write the new index.
 //
 // THE PIPELINE. After a metadata-only walk, the file data flows through four
@@ -87,7 +87,7 @@ struct Walk {
 };
 
 void warn(Walk& w, StringView path, StringView what) {
-    fprintf(stderr, "backu: warning: %.*s: %.*s\n", int(path.count), path.ptr, int(what.count), what.ptr);
+    fprintf(stderr, "bu: warning: %.*s: %.*s\n", int(path.count), path.ptr, int(what.count), what.ptr);
     ++w.warnings;
 }
 
@@ -303,7 +303,7 @@ bool setContains(const HashIndex& idx, const Array<ChunkId>& ids, const ChunkId&
 }
 
 void readWarnLocked(Pipe& p, StringView path, StringView what) {
-    fprintf(stderr, "backu: warning: %.*s: %.*s\n", int(path.count), path.ptr, int(what.count), what.ptr);
+    fprintf(stderr, "bu: warning: %.*s: %.*s\n", int(path.count), path.ptr, int(what.count), what.ptr);
     ++p.readWarnings;
 }
 
@@ -368,7 +368,7 @@ int openItem(ReaderFd& r, const Walk& w, u32 it, u64& sizeNow) {
 // overlapped) and a CDC scan that keeps up with any number of workers.
 void* readerMain(void* arg) {
     Pipe& p = *static_cast<Pipe*>(arg);
-    threadSetName("backu-reader");
+    threadSetName("bu-reader");
     const Walk& w = *p.walk;
     ReaderFd rf;
     for (;;) {
@@ -481,7 +481,7 @@ bool emitJobs(Pipe& p, u32 blockIdx, u32 item, const u8* base, const Array<Cut>&
 
 void* chunkerMain(void* arg) {
     Pipe& p = *static_cast<Pipe*>(arg);
-    threadSetName("backu-chunker");
+    threadSetName("bu-chunker");
     Array<Cut> cuts;
     cuts.reserve(kReadBlock / kCdcMin + 2);
     CdcHits hits;
@@ -577,7 +577,7 @@ void* chunkerMain(void* arg) {
 
 void* workerMain(void* arg) {
     Pipe& p = *static_cast<Pipe*>(arg);
-    threadSetName("backu-worker");
+    threadSetName("bu-worker");
     CodecState* st = static_cast<CodecState*>(defaultAllocator().alloc(sizeof(CodecState)));
     Array<u8> payload;
     payload.resize(codecBound(kMaxChunk));
@@ -691,13 +691,13 @@ int cmdCreate(int argc, char** argv, int first) {
     if (!argsParse("create", argc, argv, first, kArgKey | kArgBase | kArgIndexOut | kArgJobs | kArgNoCache | kArgVerbose, a))
         return kExitUsage;
     if (!a.indexOut) {
-        fprintf(stderr, "backu create: --index-out INDEX is required (the next increment is made from it; "
+        fprintf(stderr, "bu create: --index-out INDEX is required (the next increment is made from it; "
                         "it may be the same file as --base)\n");
         return kExitUsage;
     }
-    if (a.positional.count == 0) { fprintf(stderr, "backu create: name at least one PATH to back up\n"); return kExitUsage; }
+    if (a.positional.count == 0) { fprintf(stderr, "bu create: name at least one PATH to back up\n"); return kExitUsage; }
     if (isatty(1)) {
-        fprintf(stderr, "backu create: refusing to write a backup to a terminal; redirect stdout to a file or a pipe\n");
+        fprintf(stderr, "bu create: refusing to write a backup to a terminal; redirect stdout to a file or a pipe\n");
         return kExitUsage;
     }
     // A pipe reader that goes away (aws s3 cp failing) must become a write
@@ -716,7 +716,7 @@ int cmdCreate(int argc, char** argv, int first) {
         probe.append(".probe.");
         probe.appendU64(u64(getpid()));
         const int fd = open(probe.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (fd < 0) { fprintf(stderr, "backu: cannot write the index next to %s: %s\n", a.indexOut, strerror(errno)); return kExitRuntime; }
+        if (fd < 0) { fprintf(stderr, "bu: cannot write the index next to %s: %s\n", a.indexOut, strerror(errno)); return kExitRuntime; }
         close(fd);
         unlink(probe.c_str());
     }
@@ -739,7 +739,7 @@ int cmdCreate(int argc, char** argv, int first) {
     Walk w;
     w.base = &base;
     w.useCache = haveBase && !a.noCache;
-    // `backu create . > ./today.bk` must not back up its own output while
+    // `bu create . > ./today.bk` must not back up its own output while
     // writing it: remember stdout's inode if it is a regular file.
     {
         struct stat out;
@@ -748,12 +748,12 @@ int cmdCreate(int argc, char** argv, int first) {
     for (const char* rootArg : a.positional) {
         String stored;
         if (!storedName(StringView(rootArg), stored)) {
-            fprintf(stderr, "backu create: '%s' contains a '..' component; cd to its parent and name it from there\n", rootArg);
+            fprintf(stderr, "bu create: '%s' contains a '..' component; cd to its parent and name it from there\n", rootArg);
             return kExitUsage;
         }
         struct stat st;
         if (fstatat(AT_FDCWD, rootArg, &st, AT_SYMLINK_NOFOLLOW) != 0) {
-            fprintf(stderr, "backu create: %s: %s\n", rootArg, strerror(errno));
+            fprintf(stderr, "bu create: %s: %s\n", rootArg, strerror(errno));
             return kExitRuntime;
         }
         // For a root, "dirfd + name" is the cwd plus the path as given.
@@ -829,7 +829,7 @@ int cmdCreate(int argc, char** argv, int first) {
     for (u32 i = 0; i < started; ++i) pool[i].join();
 
     if (out.failed) {
-        fprintf(stderr, "backu: writing the backup to stdout failed: %s (index not written)\n", strerror(out.savedErrno));
+        fprintf(stderr, "bu: writing the backup to stdout failed: %s (index not written)\n", strerror(out.savedErrno));
         return kExitRuntime;
     }
 
@@ -909,8 +909,8 @@ int cmdCreate(int argc, char** argv, int first) {
         fmtBytes(out.written, b3, sizeof b3);
         const double secs = double(nowNs() - startNs) / 1e9;
         fprintf(stderr,
-                "backu: %u entries, %u files read (%s), %u from files cache (%s)\n"
-                "backu: %llu chunks, %llu new; wrote %s in %.2f s (%.0f MiB/s read) with %u workers\n",
+                "bu: %u entries, %u files read (%s), %u from files cache (%s)\n"
+                "bu: %llu chunks, %llu new; wrote %s in %.2f s (%.0f MiB/s read) with %u workers\n",
                 idx.snap.entries.count, w.reads.count, b1, cachedFiles, b2,
                 (unsigned long long)stats.chunks, (unsigned long long)stats.newChunks, b3, secs,
                 secs > 0 ? double(stats.rawRead) / secs / double(1 << 20) : 0.0, started);

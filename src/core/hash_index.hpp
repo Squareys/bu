@@ -1,6 +1,6 @@
 // hash_index.hpp — open-addressing multimap from a 64-bit hash to a u32 value.
 //
-// The one hash table in backu, used for "chunk ID -> where it is" and "path ->
+// The one hash table in bu, used for "chunk ID -> where it is" and "path ->
 // entry". It stores only the hash and an index; the caller keeps the real keys
 // in its own data-oriented array and confirms a candidate by comparing them.
 // That keeps the table at 12 bytes a slot and type-free (no templates over key
@@ -9,7 +9,7 @@
 // collide on 64 bits are both reachable.
 //
 // Linear probing, power-of-two capacity, max load 1/2, no deletion (nothing in
-// backu ever removes a key; a command builds its tables and exits).
+// bu ever removes a key; a command builds its tables and exits).
 #pragma once
 
 #include "array.hpp"

@@ -1,6 +1,6 @@
 // bytes.hpp — little-endian and LEB128 byte encoding: ByteWriter and ByteReader.
 //
-// Every on-disk structure in backu (header, trailer, manifest, index) is built
+// Every on-disk structure in bu (header, trailer, manifest, index) is built
 // with these two and nothing else, so the format has exactly one notion of
 // "a u64 on disk" and docs/format.md can define it once. Integers are unsigned
 // LEB128 varints (7 bits per byte, little-endian groups) — the same shape as

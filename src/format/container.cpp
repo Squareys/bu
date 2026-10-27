@@ -17,19 +17,19 @@ namespace {
 
 // The magic borrows PNG's trick: the CR LF and ^Z bytes make a text-mode
 // transfer or a newline-converting pipe corrupt the very first bytes, so a
-// mangled backup is reported as "not a backu file" instead of failing deep in
+// mangled backup is reported as "not a bu file" instead of failing deep in
 // a record with an authentication error.
-constexpr u8 kMagic[8] = {'B', 'A', 'C', 'K', 'U', '\r', '\n', 0x1a};
+constexpr u8 kMagic[8] = {'B', 'U', 'B', 'A', 'K', '\r', '\n', 0x1a};
 constexpr u8 kFooterMagic[4] = {'B', 'K', 'F', 'T'};
 
 // BLAKE3 derive_key contexts: hardcoded, globally unique, never reused for a
 // different purpose (BLAKE3's own rule for this mode). Changing one is a format
 // break, which is why they carry the date they were fixed.
-constexpr StringView kCtxChunkId = "backu 2026-10-25 chunk id v1"_s;
-constexpr StringView kCtxAead = "backu 2026-10-25 container aes-256-gcm key v1"_s;
-constexpr StringView kCtxCheck = "backu 2026-10-25 container header check v1"_s;
+constexpr StringView kCtxChunkId = "bu 2026-10-25 chunk id v1"_s;
+constexpr StringView kCtxAead = "bu 2026-10-25 container aes-256-gcm key v1"_s;
+constexpr StringView kCtxCheck = "bu 2026-10-25 container header check v1"_s;
 
-constexpr StringView kKeyPrefix = "backu-key-1 "_s;
+constexpr StringView kKeyPrefix = "bu-key-1 "_s;
 
 void nonceOf(u64 counter, u8 out[kNonceBytes]) {
     storeU64LE(out, counter);
@@ -57,12 +57,12 @@ bool keyLoad(const char* path, MasterKey& out, String& err) {
     // modes the user cannot change, and refusing would not make it secret.
     struct stat st;
     if (stat(path, &st) == 0 && (st.st_mode & 077))
-        fprintf(stderr, "backu: warning: key file %s is accessible by other users (chmod 600 it)\n", path);
+        fprintf(stderr, "bu: warning: key file %s is accessible by other users (chmod 600 it)\n", path);
     StringView s(reinterpret_cast<const char*>(text.ptr), text.count);
     while (!s.empty() && (s[s.count - 1] == '\n' || s[s.count - 1] == '\r')) s.count--;
     const bool ok = s.startsWith(kKeyPrefix) && hexDecode(s.from(kKeyPrefix.count), out.master.b, kKeyBytes);
     secureZero(text.ptr, text.count);
-    if (!ok) return errSet(err, path, ": not a backu key file (expected one line: backu-key-1 <64 hex digits>)");
+    if (!ok) return errSet(err, path, ": not a bu key file (expected one line: bu-key-1 <64 hex digits>)");
     blake3DeriveKey(kCtxChunkId, out.master.b, kKeyBytes, out.idKey);
     return true;
 }
@@ -197,11 +197,11 @@ bool containerOpen(const MasterKey& k, const char* path, Container& c, String& e
     struct stat st;
     if (fstat(c.fd, &st) != 0 || !S_ISREG(st.st_mode)) return fail(err, c, "not a regular file");
     c.fileSize = u64(st.st_size);
-    if (c.fileSize < kHeaderBytes + kFooterBytes) return fail(err, c, "too short to be a backu file");
+    if (c.fileSize < kHeaderBytes + kFooterBytes) return fail(err, c, "too short to be a bu file");
 
     u8 h[kHeaderBytes];
     if (!preadFull(c.fd, h, kHeaderBytes, 0, err)) return fail(err, c, err.view());
-    if (!memEqual(h, kMagic, 8)) return fail(err, c, "not a backu file (bad magic)");
+    if (!memEqual(h, kMagic, 8)) return fail(err, c, "not a bu file (bad magic)");
     const u16 version = u16(h[8] | (h[9] << 8));
     if (version != kFormatVersion) return fail(err, c, "unsupported format version");
     c.kind = u16(h[10] | (h[11] << 8));
@@ -369,7 +369,7 @@ bool indexFileWrite(const MasterKey& k, const char* path, const u8* body, u32 n,
 bool indexFileRead(const MasterKey& k, const char* path, Array<u8>& body, String& err) {
     Container c;
     if (!containerOpen(k, path, c, err)) return false;
-    if (c.kind != kKindIndex) return errSet(err, path, ": not an index file (it is a backup; pass an index made by create --index-out or backu index)");
+    if (c.kind != kKindIndex) return errSet(err, path, ": not an index file (it is a backup; pass an index made by create --index-out or bu index)");
     return containerReadMeta(c, c.lastOffset, c.lastLen, kRecIndex, kNonceIndex, body, err);
 }
 

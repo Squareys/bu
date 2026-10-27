@@ -1,8 +1,8 @@
-// bench.cpp — `backu_bench`: single-thread throughput of each primitive on the
-// unit of work backu actually gives it (a 16 KiB chunk), so the numbers say
+// bench.cpp — `bu_bench`: single-thread throughput of each primitive on the
+// unit of work bu actually gives it (a 16 KiB chunk), so the numbers say
 // what one worker can do per second and which stage bounds a backup.
 //
-//   backu_bench [MiB]     (default 512 MiB processed per primitive)
+//   bu_bench [MiB]     (default 512 MiB processed per primitive)
 
 #include "chunk/chunker.hpp"
 #include "core/array.hpp"
@@ -27,7 +27,7 @@ void line(const char* what, u64 bytes, double secs) {
 
 int main(int argc, char** argv) {
     u64 mib = 512;
-    if (argc > 1 && (!parseU64(StringView(argv[1]), mib) || mib == 0)) { fprintf(stderr, "usage: backu_bench [MiB]\n"); return 2; }
+    if (argc > 1 && (!parseU64(StringView(argv[1]), mib) || mib == 0)) { fprintf(stderr, "usage: bu_bench [MiB]\n"); return 2; }
     const u64 total = mib << 20;
     const u32 kChunk = 16384;
 
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
 
     String err;
     if (!cryptoCpuCheck(err)) { fprintf(stderr, "%.*s\n", int(err.count), err.ptr); return 1; }
-    printf("backu_bench: %llu MiB per primitive, 16 KiB chunks, one thread\n", (unsigned long long)mib);
+    printf("bu_bench: %llu MiB per primitive, 16 KiB chunks, one thread\n", (unsigned long long)mib);
 
     Key key; memSet(key.b, 3, 32);
     u8 out[32];

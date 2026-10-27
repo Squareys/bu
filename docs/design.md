@@ -1,6 +1,6 @@
-# backu design
+# bu design
 
-backu makes deduplicated, compressed, authenticated-encrypted incremental
+bu makes deduplicated, compressed, authenticated-encrypted incremental
 backups with one small binary and no server, no repository directory and no
 network code. This document says why it is built the way it is. The byte
 layout is in [format.md](format.md).
@@ -14,7 +14,7 @@ There are three kinds of file:
 - the **index**: a small local file describing the latest snapshot, which the
   next `create` needs instead of the previous backup.
 
-A **chain** is a full backup (or a merged file) followed by increments. backu
+A **chain** is a full backup (or a merged file) followed by increments. bu
 never needs to know where backups are stored: `create` and `merge` stream to
 stdout, so `> file`, `| aws s3 cp - s3://...` and `| ssh host 'cat > x'` are
 all the same to it. Reading commands (`restore`, `check`, `list`, `index`,
@@ -61,7 +61,7 @@ unit test proves the parallel form cuts identically.
 
 SQLite rewrites pages in place: an `UPDATE` touching 2% of rows dirties the
 pages holding them and nothing else. CDC would cut across page boundaries, so
-one changed page would usually dirty two chunks. backu recognises a database
+one changed page would usually dirty two chunks. bu recognises a database
 by its 100-byte header (`"SQLite format 3\0"`, page size as a big-endian `u16`
 at offset 16, `1` meaning 65536) and cuts at exact page boundaries, **one page
 per chunk** for pages of 4 KiB and up; smaller pages are grouped to 4 KiB,
@@ -72,7 +72,7 @@ rewritten at random, 2 999 pages actually differing: the increment was
 0.993 × (changed pages × 4096). The overhead per page is smaller than what
 LZ4 wins back.
 
-backu does not make a live database consistent. Give it a consistent copy —
+bu does not make a live database consistent. Give it a consistent copy —
 `sqlite3 db ".backup copy.db"`, the online backup API, or a filesystem
 snapshot — not a file another process is writing (a copy taken mid-write can
 be corrupt in ways no backup tool can see).
@@ -96,7 +96,7 @@ SHA extensions, and SIMD-parallel inside a single 16 KiB input.
 per core here, see §9), it is the most scrutinised AEAD there is, and
 libsodium's AES-NI implementation is self-contained, runtime-targeted and
 written by people who do this for a living. It needs AES-NI, PCLMULQDQ and AVX;
-backu checks CPUID itself and refuses other CPUs by name rather than ship a
+bu checks CPUID itself and refuses other CPUs by name rather than ship a
 slow, rarely exercised software fallback. (This libsodium release has no
 VAES/VPCLMULQDQ wide path; on CPUs that have it, a 4-block-wide GHASH would
 roughly double AES-GCM throughput, which is not the bottleneck today.)
@@ -215,7 +215,7 @@ reappears two increments later, its chunks are stored again. This is
 deliberate: it is what makes merge safe (§7) and keeps the index the size of
 one snapshot.
 
-A lost index is rebuilt from the chain with `backu index`; because manifests
+A lost index is rebuilt from the chain with `bu index`; because manifests
 carry dev/ino/ctime too, the rebuilt index has the files cache intact.
 
 ## 7. Merge
@@ -307,7 +307,7 @@ is opened is backed up anyway (what is there, up to the walked size) with a
 "changed size" warning; one that cannot be opened or read is left out with a
 warning. Either way `create` exits 1 while the backup and index stay valid,
 which is Borg's convention for "completed with warnings". A backup written
-into the tree it is backing up (`backu create . > x.bk`) skips its own output
+into the tree it is backing up (`bu create . > x.bk`) skips its own output
 file by inode, and an index location that cannot be written is refused
 before anything is read.
 
@@ -350,7 +350,7 @@ merge: 3.0 GB/s.
 
 ## 10. Size
 
-Stripped binary: **174 944 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **174 768 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
@@ -358,9 +358,9 @@ glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 | BLAKE3 (portable + SSE4.1 + AVX2 + AVX-512, -O3) | 64 114 |
 | AES-256-GCM (libsodium AES-NI, -O3) | 21 104 |
 | LZ4 (inlined into codecEncode/codecDecode) | 8 768 |
-| backu hot path (-O2) | 4 078 |
-| backu cold path: CLI, walk, pipeline, manifest, restore, merge (-Oz) | 56 105 |
-| crt and runtime glue | 3 966 |
+| bu hot path (-O2) | 4 078 |
+| bu cold path: CLI, walk, pipeline, manifest, restore, merge (-Oz) | 56 108 |
+| crt and runtime glue | 3 962 |
 
 The remaining ~17 KB of the file are ELF headers, dynamic-linking tables
 (`.dynsym`, `.dynstr`, relocations for the ~80 glibc symbols used) and
@@ -386,7 +386,7 @@ delete, reorder, truncate and replay them, and does not have the key file.
 
 **What they learn:**
 
-- that these are backu files, the format version and kind;
+- that these are bu files, the format version and kind;
 - per backup: the number of new chunks and the length of each chunk record
   (≈ compressed chunk size), the size of the manifest and the trailer
   (≈ number of files and chunks), the total size;
@@ -401,7 +401,7 @@ key), or anything about content beyond the above.
 chunk lengths of a large file, which CDC derives from its content, can be
 used to test whether a backup contains a *known* file (fingerprinting); and
 per-chunk compressibility leaks through record lengths. Padding chunk
-records would blunt both at a cost in size; backu does not pad.
+records would blunt both at a cost in size; bu does not pad.
 
 **What they can do:**
 
@@ -412,7 +412,7 @@ records would blunt both at a cost in size; backu does not pad.
 - *delete or withhold files:* yes, which `restore` reports as an incomplete
   chain (missing parent snapshot or missing chunks) rather than as damage;
 - *roll back:* present an older but valid chain instead of the current one.
-  backu cannot detect that without external state; keep the index (which
+  bu cannot detect that without external state; keep the index (which
   records the latest generation and snapshot ID) or a list of expected files
   somewhere the attacker cannot write;
 - *substitute files between two chains made with the same key:* each file is

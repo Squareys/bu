@@ -1,13 +1,13 @@
 # lib.sh — shared helpers for the integration tests (sourced, not run).
 #
-# Every test runs the real binary ($BACKU) in a fresh temp directory under
-# $BACKU_TEST_TMP (default: a mktemp dir in /tmp), cd's into it, and is
+# Every test runs the real binary ($BU) in a fresh temp directory under
+# $BU_TEST_TMP (default: a mktemp dir in /tmp), cd's into it, and is
 # deleted afterwards unless KEEP=1. A test fails by exiting non-zero; `fail`
 # says why. Paths stay relative inside the work dir so failure output is short.
 set -euo pipefail
 
-: "${BACKU:?BACKU must point at the backu binary (scripts/test.sh sets it)}"
-WORK="$(mktemp -d "${BACKU_TEST_TMP:-/tmp}/backu-it.XXXXXX")"
+: "${BU:?BU must point at the bu binary (scripts/test.sh sets it)}"
+WORK="$(mktemp -d "${BU_TEST_TMP:-/tmp}/bu-it.XXXXXX")"
 cleanup() { if [ "${KEEP:-0}" = 1 ]; then echo "  (kept $WORK)"; else rm -rf "$WORK"; fi; }
 trap cleanup EXIT
 cd "$WORK"
@@ -53,4 +53,4 @@ expect_fail() {   # expect_fail PATTERN cmd...
     echo "$out" | grep -qi -- "$pat" || fail "expected '$pat' in error from '$*', got: $out"
 }
 
-(umask 077; "$BACKU" keygen > key)
+(umask 077; "$BU" keygen > key)

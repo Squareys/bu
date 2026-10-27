@@ -17,7 +17,7 @@
 // keeps a snapshot's ID, so increments made after a merge still find theirs.
 //
 // The files-cache fields (dev, ino, ctime) live in every manifest, not only
-// in the index, so `backu index` can rebuild a complete files cache from the
+// in the index, so `bu index` can rebuild a complete files cache from the
 // backups alone. They are encrypted like everything else.
 #pragma once
 
@@ -101,7 +101,7 @@ bool pathIsSafe(StringView p);
 // table: for each distinct chunk, which backup file (by the first 16 bytes of
 // that file's salt) it was written to. Restore never needs the table — it finds
 // chunks by ID across whatever files it is given, which is what keeps chains
-// working after merges rename everything — but `backu list` shows it.
+// working after merges rename everything — but `bu list` shows it.
 
 struct IndexData {
     Snapshot snap;

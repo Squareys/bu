@@ -1,5 +1,5 @@
 // test_main.cpp — runs every registered BK_TEST, optionally filtered by a
-// substring of the test name: `backu_tests [FILTER]`. Exit 1 if any failed.
+// substring of the test name: `bu_tests [FILTER]`. Exit 1 if any failed.
 
 #include "test.hpp"
 

@@ -44,10 +44,10 @@ struct Args {
 };
 
 // Parse argv[first..argc) for subcommand `cmd`, accepting the options in
-// `allowed`. On a usage error prints "backu CMD: message" and returns false.
+// `allowed`. On a usage error prints "bu CMD: message" and returns false.
 [[nodiscard]] bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, Args& out);
 
-// Print "backu: message" (or "backu CMD: message") to stderr.
+// Print "bu: message" (or "bu CMD: message") to stderr.
 void report(StringView msg);
 
 // Jobs to use: -j, or the online CPU count.

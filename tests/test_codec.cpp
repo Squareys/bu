@@ -11,7 +11,7 @@ using namespace bk;
 BK_TEST(codec_compressible_data_uses_lz4_and_roundtrips) {
     Array<u8> raw, enc, back;
     raw.resize(65536);
-    for (u32 i = 0; i < raw.count; ++i) raw[i] = u8("backu "[i % 6]);
+    for (u32 i = 0; i < raw.count; ++i) raw[i] = u8("bu.bk "[i % 6]);
     enc.resize(codecBound(raw.count));
     CodecState st;
     const u32 n = codecEncode(st, raw.ptr, raw.count, enc.ptr);

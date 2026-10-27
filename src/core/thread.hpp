@@ -5,7 +5,7 @@
 // static_asserts the sizes, so the ~20 TUs that need a lock do not all parse
 // pthread.h. Linux x86-64 glibc only, like everything else here.
 //
-// Two shapes of parallelism exist in backu and this header provides both:
+// Two shapes of parallelism exist in bu and this header provides both:
 //   * the create pipeline (src/cmd/create.cpp) builds its own stages from
 //     Mutex + Cond + Thread, because its stages have different jobs;
 //   * restore, check and merge are "do N independent things, then continue",

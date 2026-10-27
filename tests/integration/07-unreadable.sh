@@ -10,16 +10,16 @@ prand ok 300000 > src/ok.bin
 prand secret 300000 > src/secret.bin
 chmod 000 src/secret.bin
 rc=0
-"$BACKU" create --key key --index-out idx src > b.bk 2> err || rc=$?
+"$BU" create --key key --index-out idx src > b.bk 2> err || rc=$?
 [ "$rc" = 1 ] || fail "expected exit 1 for a partial backup, got $rc"
 grep -q "secret.bin" err || fail "no warning naming the unreadable file: $(cat err)"
-"$BACKU" check --key key b.bk
-rm -rf out && "$BACKU" restore --key key -C out b.bk
+"$BU" check --key key b.bk
+rm -rf out && "$BU" restore --key key -C out b.bk
 cmp out/src/ok.bin src/ok.bin || fail "readable file not restored"
 [ ! -e out/src/secret.bin ] || fail "unreadable file restored from nothing"
 # The next increment, once readable, picks it up.
 chmod 600 src/secret.bin
-"$BACKU" create --key key --base idx --index-out idx src > inc.bk
-rm -rf out && "$BACKU" restore --key key -C out b.bk inc.bk
+"$BU" create --key key --base idx --index-out idx src > inc.bk
+rm -rf out && "$BU" restore --key key -C out b.bk inc.bk
 cmp out/src/secret.bin src/secret.bin || fail "file not picked up once readable"
 note ok

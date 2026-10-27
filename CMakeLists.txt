@@ -1,8 +1,8 @@
-# backu — deduplicated, compressed, authenticated-encrypted incremental backups
+# bu — deduplicated, compressed, authenticated-encrypted incremental backups
 # as one small native binary. Linux x86-64, clang, no STL in our own code (see
 # CLAUDE.md), no exceptions, no RTTI.
 cmake_minimum_required(VERSION 3.20)
-project(backu VERSION 0.1.0 LANGUAGES C CXX)
+project(bu VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -91,7 +91,7 @@ if(BK_SANITIZE)
 endif()
 
 # BLAKE3: portable + SSE4.1 + AVX2 + AVX-512, runtime dispatch kept. SSE2 is
-# compiled out: backu refuses CPUs without AES-NI, and every AES-NI CPU has
+# compiled out: bu refuses CPUs without AES-NI, and every AES-NI CPU has
 # SSE4.1, so the SSE2 variant could never be selected.
 add_library(bk_blake3 OBJECT
     third_party/blake3/blake3.c
@@ -119,7 +119,7 @@ target_compile_definitions(bk_aesgcm PRIVATE CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1
     HAVE_TMMINTRIN_H=1 HAVE_WMMINTRIN_H=1 HAVE_GCC_MEMORY_FENCES=1 _GNU_SOURCE)
 target_compile_options(bk_aesgcm PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
 
-# ---------------------------------------------------------------- backu ----
+# ------------------------------------------------------------------- bu ----
 
 # Hot: per-byte or per-chunk work. These keep -O2 (the vendored code -O3).
 set(BK_HOT_SOURCES
@@ -164,44 +164,44 @@ target_compile_options(bk_cold PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_C
 set(BK_OBJECTS $<TARGET_OBJECTS:bk_hot> $<TARGET_OBJECTS:bk_cold> $<TARGET_OBJECTS:bk_blake3>
     $<TARGET_OBJECTS:bk_lz4> $<TARGET_OBJECTS:bk_aesgcm>)
 
-add_executable(backu src/main.cpp ${BK_OBJECTS})
-target_include_directories(backu PRIVATE src)
-target_compile_options(backu PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
-target_link_options(backu PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
-target_compile_definitions(backu PRIVATE BACKU_VERSION="${PROJECT_VERSION}")
+add_executable(bu src/main.cpp ${BK_OBJECTS})
+target_include_directories(bu PRIVATE src)
+target_compile_options(bu PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
+target_link_options(bu PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
+target_compile_definitions(bu PRIVATE BU_VERSION="${PROJECT_VERSION}")
 if(NOT BK_SANITIZE)
     # Strip at link time: the shipped artifact is the stripped one, and the
     # size budget is measured on exactly that file.
-    target_link_options(backu PRIVATE -s)
+    target_link_options(bu PRIVATE -s)
 endif()
 
 # Unstripped twin for the size breakdown (scripts/size_report.sh).
 if(NOT BK_SANITIZE)
-    add_executable(backu_symbols src/main.cpp ${BK_OBJECTS})
-    target_include_directories(backu_symbols PRIVATE src)
-    target_compile_options(backu_symbols PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
-    target_link_options(backu_symbols PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
-    target_compile_definitions(backu_symbols PRIVATE BACKU_VERSION="${PROJECT_VERSION}")
-    set_target_properties(backu_symbols PROPERTIES EXCLUDE_FROM_ALL ON)
+    add_executable(bu_symbols src/main.cpp ${BK_OBJECTS})
+    target_include_directories(bu_symbols PRIVATE src)
+    target_compile_options(bu_symbols PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
+    target_link_options(bu_symbols PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
+    target_compile_definitions(bu_symbols PRIVATE BU_VERSION="${PROJECT_VERSION}")
+    set_target_properties(bu_symbols PROPERTIES EXCLUDE_FROM_ALL ON)
 endif()
 
 # ---------------------------------------------------------------- tests ----
 
 enable_testing()
-add_executable(backu_tests
+add_executable(bu_tests
     tests/test_main.cpp
     tests/test_crypto.cpp
     tests/test_codec.cpp
     tests/test_chunker.cpp
     tests/test_format.cpp
     ${BK_OBJECTS})
-target_include_directories(backu_tests PRIVATE src tests)
-target_compile_options(backu_tests PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})
-target_link_options(backu_tests PRIVATE ${BK_LINK_FLAGS})
-add_test(NAME unit COMMAND backu_tests)
+target_include_directories(bu_tests PRIVATE src tests)
+target_compile_options(bu_tests PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})
+target_link_options(bu_tests PRIVATE ${BK_LINK_FLAGS})
+add_test(NAME unit COMMAND bu_tests)
 
 # Primitive throughput (scripts/bench.sh runs it); not part of the test gate.
-add_executable(backu_bench tests/bench.cpp ${BK_OBJECTS})
-target_include_directories(backu_bench PRIVATE src)
-target_compile_options(backu_bench PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})
-target_link_options(backu_bench PRIVATE ${BK_LINK_FLAGS})
+add_executable(bu_bench tests/bench.cpp ${BK_OBJECTS})
+target_include_directories(bu_bench PRIVATE src)
+target_compile_options(bu_bench PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})
+target_link_options(bu_bench PRIVATE ${BK_LINK_FLAGS})

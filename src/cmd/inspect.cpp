@@ -90,19 +90,19 @@ bool loadKey(const Args& a, MasterKey& key) {
 int cmdCheck(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("check", argc, argv, first, kArgKey | kArgJobs | kArgVerbose, a)) return kExitUsage;
-    if (a.positional.count == 0) { fprintf(stderr, "backu check: name the backup files to check\n"); return kExitUsage; }
+    if (a.positional.count == 0) { fprintf(stderr, "bu check: name the backup files to check\n"); return kExitUsage; }
     MasterKey key;
     if (!loadKey(a, key)) return kExitRuntime;
     String err;
     Chain chain;
-    if (!chainOpen(key, a.positional, chain, err)) { report(err); fprintf(stderr, "backu: check FAILED\n"); return kExitRuntime; }
+    if (!chainOpen(key, a.positional, chain, err)) { report(err); fprintf(stderr, "bu: check FAILED\n"); return kExitRuntime; }
 
     u32 problems = 0;
     for (u32 i = 0; i < chain.snaps.count; ++i) {
         if (!chainResolve(chain, i, err)) { report(err); ++problems; continue; }
         const u32 missing = chainCountMissing(chain, chain.snaps[i].snap);
         if (missing) {
-            fprintf(stderr, "backu: %s: snapshot references %u chunks that are in none of the given files\n",
+            fprintf(stderr, "bu: %s: snapshot references %u chunks that are in none of the given files\n",
                     chain.files[i].path.c_str(), missing);
             ++problems;
         }
@@ -123,12 +123,12 @@ int cmdCheck(int argc, char** argv, int first) {
     problems += c.bad;
 
     if (problems) {
-        fprintf(stderr, "backu: check FAILED: %u problem%s in %u file%s\n", problems, problems == 1 ? "" : "s",
+        fprintf(stderr, "bu: check FAILED: %u problem%s in %u file%s\n", problems, problems == 1 ? "" : "s",
                 chain.files.count, chain.files.count == 1 ? "" : "s");
         return kExitRuntime;
     }
     if (a.verbose)
-        fprintf(stderr, "backu: check ok: %u files, %u chunk records verified, latest snapshot generation %llu\n",
+        fprintf(stderr, "bu: check ok: %u files, %u chunk records verified, latest snapshot generation %llu\n",
                 chain.files.count, c.work.count, (unsigned long long)chain.snaps[chainLatest(chain)].head.gen);
     return kExitOk;
 }
@@ -136,8 +136,8 @@ int cmdCheck(int argc, char** argv, int first) {
 int cmdIndex(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("index", argc, argv, first, kArgKey | kArgOut, a)) return kExitUsage;
-    if (!a.out) { fprintf(stderr, "backu index: -o INDEX is required\n"); return kExitUsage; }
-    if (a.positional.count == 0) { fprintf(stderr, "backu index: name the backup files of the chain\n"); return kExitUsage; }
+    if (!a.out) { fprintf(stderr, "bu index: -o INDEX is required\n"); return kExitUsage; }
+    if (a.positional.count == 0) { fprintf(stderr, "bu index: name the backup files of the chain\n"); return kExitUsage; }
     MasterKey key;
     if (!loadKey(a, key)) return kExitRuntime;
     String err;
@@ -158,7 +158,7 @@ int cmdIndex(int argc, char** argv, int first) {
     for (u32 i = 0; i < d.distinct.count; ++i) {
         u32 f, ch;
         if (!chainFind(chain, d.distinct[i], f, ch)) {
-            fprintf(stderr, "backu: the latest snapshot references chunks in none of the given files; "
+            fprintf(stderr, "bu: the latest snapshot references chunks in none of the given files; "
                             "an index from it would make the next increment reference missing data\n");
             return kExitRuntime;
         }
@@ -178,7 +178,7 @@ int cmdIndex(int argc, char** argv, int first) {
 int cmdList(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("list", argc, argv, first, kArgKey, a)) return kExitUsage;
-    if (a.positional.count == 0) { fprintf(stderr, "backu list: name backup files (or one index file)\n"); return kExitUsage; }
+    if (a.positional.count == 0) { fprintf(stderr, "bu list: name backup files (or one index file)\n"); return kExitUsage; }
     MasterKey key;
     if (!loadKey(a, key)) return kExitRuntime;
     String err;
@@ -249,14 +249,14 @@ int cmdList(int argc, char** argv, int first) {
 int cmdKeygen(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("keygen", argc, argv, first, 0, a)) return kExitUsage;
-    if (a.positional.count) { fprintf(stderr, "backu keygen: takes no arguments (the key goes to stdout)\n"); return kExitUsage; }
+    if (a.positional.count) { fprintf(stderr, "bu keygen: takes no arguments (the key goes to stdout)\n"); return kExitUsage; }
     String key, err;
     if (!keyGenerate(key, err)) { report(err); return kExitRuntime; }
     const bool ok = writeAll(1, key.ptr, key.count);
     secureZero(key.ptr, key.count);
     if (!ok) { report("writing the key failed"_s); return kExitRuntime; }
     if (isatty(1))
-        fprintf(stderr, "backu: that key is the only way to read your backups; store it somewhere other than them\n");
+        fprintf(stderr, "bu: that key is the only way to read your backups; store it somewhere other than them\n");
     return kExitOk;
 }
 

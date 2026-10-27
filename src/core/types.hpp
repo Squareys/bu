@@ -29,7 +29,7 @@ using uptr  = __UINTPTR_TYPE__;
 static_assert(sizeof(u8) == 1 && sizeof(u16) == 2 && sizeof(u32) == 4 && sizeof(u64) == 8,
               "unexpected fixed-width integer sizes — wrong compiler/target?");
 static_assert(sizeof(usize) == 8 && sizeof(uptr) == 8,
-              "backu targets 64-bit Linux x86-64 only");
+              "bu targets 64-bit Linux x86-64 only");
 
 // Sentinel for "no index" in the data-oriented arrays. We use index-based
 // references everywhere instead of pointers (pointers are unstable across

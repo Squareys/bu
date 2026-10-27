@@ -13,7 +13,7 @@ namespace {
 struct GearTable { u64 v[256]; };
 constexpr GearTable makeGear() {
     GearTable t{};
-    u64 s = 0x6261636b75636463ull;   // "backucdc"
+    u64 s = 0x6261636b75636463ull;   // arbitrary fixed seed (ASCII of the project's first name + "cdc")
     for (int i = 0; i < 256; ++i) {
         s += 0x9e3779b97f4a7c15ull;
         u64 z = s;

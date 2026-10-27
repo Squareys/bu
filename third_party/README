@@ -1,7 +1,7 @@
 third_party/ — vendored dependencies
 ====================================
 
-Everything here is third-party source compiled into backu. Rules:
+Everything here is third-party source compiled into bu. Rules:
 
   * Vendor upstream release files verbatim. Never edit them in place: trim
     and configure through compile-time defines in CMakeLists.txt, so a version
@@ -10,7 +10,7 @@ Everything here is third-party source compiled into backu. Rules:
     flags (-O3; see CMakeLists.txt). Our warnings and no-STL rules apply to
     src/, not to vendored C.
   * Permissive licences only. Each library's licence file sits beside it.
-  * Each header is included by exactly one backu translation unit (named
+  * Each header is included by exactly one bu translation unit (named
     below), so replacing a library is a one-file change.
   * Record the exact version, the URL of the release artifact and its sha256,
     so the next bump is reproducible and the provenance checkable.
@@ -25,7 +25,7 @@ BLAKE3  1.8.7  —  CC0-1.0 OR Apache-2.0 (OR Apache-2.0 WITH LLVM-exception)
               blake3_portable.c,blake3_sse41.c,blake3_avx2.c,blake3_avx512.c}
               from c/, plus LICENSE_A2, LICENSE_A2LLVM, LICENSE_CC0.
     Target:   bk_blake3. Header confined to src/crypto/crypto.cpp.
-    Config:   BLAKE3_NO_SSE2 — backu refuses CPUs without AES-NI, and every
+    Config:   BLAKE3_NO_SSE2 — bu refuses CPUs without AES-NI, and every
               AES-NI CPU has SSE4.1, so the SSE2 variant could never be
               dispatched to. The intrinsics files are compiled with -msse4.1,
               -mavx2 and -mavx512f -mavx512vl respectively; blake3_dispatch.c
@@ -57,7 +57,7 @@ libsodium  1.0.22  —  ISC
                 crypto_verify_16.h,export.h,randombytes.h,runtime.h,utils.h,
                 private/common.h,private/sse2_64_32.h}  (declarations it includes)
               libsodium/LICENSE
-              libsodium/shim/sodium_shim.c — NOT upstream: written for backu
+              libsodium/shim/sodium_shim.c — NOT upstream: written for bu
                 (MIT, like src/). Defines the five support symbols the AES-GCM
                 file references (sodium_misuse, sodium_memzero,
                 crypto_verify_16, sodium_runtime_has_{aesni,pclmul,avx}) so that

@@ -20,13 +20,13 @@ for arg in "$@"; do
     esac
 done
 BUILD_DIR="$(scripts/build.sh $ASAN | tail -1)"
-export BACKU="$BUILD_DIR/backu"
+export BU="$BUILD_DIR/bu"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
 export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:second_deadlock_stack=1}"
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}"
 
 echo "== unit tests"
-"$BUILD_DIR/backu_tests"
+"$BUILD_DIR/bu_tests"
 
 pass=0; failed=0; failures=""
 for t in tests/integration/[0-9]*.sh; do

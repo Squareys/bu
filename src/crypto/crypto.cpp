@@ -36,17 +36,17 @@ bool cryptoCpuCheck(String& err) {
     unsigned a = 0, b = 0, c = 0, d = 0;
     if (!__get_cpuid(1, &a, &b, &c, &d)) return errSet(err, "cannot query CPU features (CPUID)");
     if (!(c & bit_AES))
-        return errSet(err, "this CPU lacks AES-NI, which backu's AES-256-GCM requires "
+        return errSet(err, "this CPU lacks AES-NI, which bu's AES-256-GCM requires "
                            "(every x86-64 CPU since ~2011 has it; check the VM's CPU model)");
     if (!(c & bit_PCLMUL))
-        return errSet(err, "this CPU lacks PCLMULQDQ, which backu's AES-256-GCM requires");
+        return errSet(err, "this CPU lacks PCLMULQDQ, which bu's AES-256-GCM requires");
     bool avx = (c & bit_AVX) && (c & bit_OSXSAVE);
     if (avx) {
         unsigned lo, hi;
         __asm__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
         avx = (lo & 6) == 6;
     }
-    if (!avx) return errSet(err, "this CPU (or OS) lacks AVX, which backu's AES-256-GCM code path requires");
+    if (!avx) return errSet(err, "this CPU (or OS) lacks AVX, which bu's AES-256-GCM code path requires");
     return true;
 }
 

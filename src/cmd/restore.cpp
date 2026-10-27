@@ -1,4 +1,4 @@
-// restore.cpp — `backu restore`: recreate the latest snapshot of a chain.
+// restore.cpp — `bu restore`: recreate the latest snapshot of a chain.
 //
 // Every chunk is authenticated (GCM tag under its file's key, with its ID in
 // the associated data) and then re-hashed (keyed BLAKE3 must equal the ID it
@@ -144,7 +144,7 @@ struct Restorer {
 
 void entryError(Restorer& r, const Entry& e, StringView what) {
     const StringView p = entryPath(*r.snap, e);
-    fprintf(stderr, "backu: %.*s: %.*s\n", int(p.count), p.ptr, int(what.count), what.ptr);
+    fprintf(stderr, "bu: %.*s: %.*s\n", int(p.count), p.ptr, int(what.count), what.ptr);
     ++r.errors;
 }
 
@@ -205,12 +205,12 @@ int cmdRestore(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("restore", argc, argv, first, kArgKey | kArgDir | kArgPath | kArgJobs | kArgVerbose, a))
         return kExitUsage;
-    if (a.positional.count == 0) { fprintf(stderr, "backu restore: name the backup files of the chain\n"); return kExitUsage; }
+    if (a.positional.count == 0) { fprintf(stderr, "bu restore: name the backup files of the chain\n"); return kExitUsage; }
     StringView prefix = a.path ? StringView(a.path) : StringView();
     while (prefix.endsWith("/"_s)) prefix.count--;
     while (prefix.startsWith("/"_s)) prefix = prefix.from(1);
     if (a.path && !pathIsSafe(prefix)) {
-        fprintf(stderr, "backu restore: --path must name a relative path inside the backup, not '%s'\n", a.path);
+        fprintf(stderr, "bu restore: --path must name a relative path inside the backup, not '%s'\n", a.path);
         return kExitUsage;
     }
 
@@ -225,17 +225,17 @@ int cmdRestore(int argc, char** argv, int first) {
     const Snapshot& snap = chain.snaps[latest].snap;
     const u32 missing = chainCountMissing(chain, snap);
     if (missing) {
-        fprintf(stderr, "backu: %u chunk references point to chunks in none of the given files; "
+        fprintf(stderr, "bu: %u chunk references point to chunks in none of the given files; "
                         "the chain is incomplete (give every file from the full backup on)\n", missing);
         return kExitRuntime;
     }
 
     const char* dir = a.dir ? a.dir : ".";
-    if (mkdir(dir, 0700) != 0 && errno != EEXIST) { fprintf(stderr, "backu: %s: %s\n", dir, strerror(errno)); return kExitRuntime; }
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST) { fprintf(stderr, "bu: %s: %s\n", dir, strerror(errno)); return kExitRuntime; }
     Restorer r;
     r.key = &key; r.chain = &chain; r.snap = &snap;
     r.dirs.root = open(dir, O_PATH | O_DIRECTORY | O_CLOEXEC);
-    if (r.dirs.root < 0) { fprintf(stderr, "backu: %s: %s\n", dir, strerror(errno)); return kExitRuntime; }
+    if (r.dirs.root < 0) { fprintf(stderr, "bu: %s: %s\n", dir, strerror(errno)); return kExitRuntime; }
     r.chown = geteuid() == 0;
     r.pool.init(argsJobs(a));
     r.batch.key = &key; r.batch.chain = &chain;
@@ -296,10 +296,10 @@ int cmdRestore(int argc, char** argv, int first) {
     r.batch.mu.destroy();
     close(r.dirs.root);
     if (a.verbose)
-        fprintf(stderr, "backu: restored %llu files (%llu bytes) from snapshot generation %llu\n",
+        fprintf(stderr, "bu: restored %llu files (%llu bytes) from snapshot generation %llu\n",
                 (unsigned long long)r.files, (unsigned long long)r.bytes, (unsigned long long)snap.gen);
     if (fatal || r.errors) {
-        fprintf(stderr, "backu: restore FAILED (%u error%s); the restored tree is incomplete\n", r.errors + (fatal && !r.errors),
+        fprintf(stderr, "bu: restore FAILED (%u error%s); the restored tree is incomplete\n", r.errors + (fatal && !r.errors),
                 r.errors == 1 ? "" : "s");
         return kExitRuntime;
     }

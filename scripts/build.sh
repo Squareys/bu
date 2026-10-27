@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build backu out of tree.
+# Build bu out of tree.
 #
 #   scripts/build.sh [Debug|Release] [--asan|--tsan] [--print-build-dir]
 #
@@ -29,7 +29,7 @@ SUFFIX=""
 [ "$SANITIZE" = ON ] && SUFFIX="-asan"
 [ "$TSAN" = ON ] && SUFFIX="-tsan"
 if [ "$SANITIZE" = ON ] && [ "$TSAN" = ON ]; then echo "build.sh: --asan and --tsan are separate builds" >&2; exit 2; fi
-BUILD_DIR="${BACKU_BUILD_ROOT:-$HOME/.cache}/backu-build-${BUILD_TYPE}-${KEY}${SUFFIX}"
+BUILD_DIR="${BU_BUILD_ROOT:-$HOME/.cache}/bu-build-${BUILD_TYPE}-${KEY}${SUFFIX}"
 
 if [ "$PRINT" = 1 ]; then echo "$BUILD_DIR"; exit 0; fi
 

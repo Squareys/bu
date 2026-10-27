@@ -67,7 +67,7 @@ void* helperMain(void* argp) {
     ThreadPool& p = *arg->pool;
     const u32 worker = arg->worker;
     defaultAllocator().free(arg);
-    threadSetName("backu-pool");
+    threadSetName("bu-pool");
     u64 seen = 0;
     p.mu.lock();
     for (;;) {

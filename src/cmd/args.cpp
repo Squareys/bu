@@ -23,7 +23,7 @@ const Spec kSpecs[] = {
 };
 
 bool usageError(const char* cmd, StringView a, StringView b = ""_s, StringView c = ""_s) {
-    fprintf(stderr, "backu %s: %.*s%.*s%.*s\n(run `backu help` for usage)\n", cmd, int(a.count), a.ptr,
+    fprintf(stderr, "bu %s: %.*s%.*s%.*s\n(run `bu help` for usage)\n", cmd, int(a.count), a.ptr,
             int(b.count), b.ptr, int(c.count), c.ptr);
     return false;
 }
@@ -75,7 +75,7 @@ bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, A
 }
 
 void report(StringView msg) {
-    fprintf(stderr, "backu: %.*s\n", int(msg.count), msg.ptr);
+    fprintf(stderr, "bu: %.*s\n", int(msg.count), msg.ptr);
 }
 
 u32 argsJobs(const Args& a) { return a.jobs ? a.jobs : cpuCount(); }

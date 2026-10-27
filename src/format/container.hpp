@@ -1,11 +1,11 @@
-// container.hpp — the backu file format: header, sealed records, footer.
+// container.hpp — the bu file format: header, sealed records, footer.
 //
-// One container shape serves both kinds of file backu writes — a backup and an
+// One container shape serves both kinds of file bu writes — a backup and an
 // index — so there is one parser to harden and one place docs/format.md
 // describes. Layout (all integers little-endian):
 //
 //   header   64 bytes, plaintext
-//            magic "BACKU\r\n\x1a" | u16 version | u16 kind | u32 reserved
+//            magic "BUBAK\r\n\x1a" | u16 version | u16 kind | u32 reserved
 //            | salt[32] | check[16] = keyed-BLAKE3(checkKey, header[0..48))
 //   records  repeated: u32 length | AES-256-GCM ciphertext | 16-byte tag
 //   footer   16 bytes: u64 trailer offset | "BKFT" | u32 reserved (0)
@@ -66,7 +66,7 @@ struct MasterKey {
     Key idKey;        // derived: keyed-BLAKE3 key for chunk IDs
 };
 
-// Parse a key file ("backu-key-1 <64 hex digits>\n"); derives idKey.
+// Parse a key file ("bu-key-1 <64 hex digits>\n"); derives idKey.
 [[nodiscard]] bool keyLoad(const char* path, MasterKey& out, String& err);
 // A fresh key file's text.
 [[nodiscard]] bool keyGenerate(String& out, String& err);

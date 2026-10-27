@@ -1,4 +1,4 @@
-# backu
+# bu — backup utility
 
 Deduplicated, compressed, authenticated-encrypted incremental backups in one
 small native binary (~175 KB, Linux x86-64). A very lightweight take on what
@@ -26,42 +26,42 @@ Needs clang, CMake ≥ 3.20 and Ninja. Nothing else: the three libraries
 (BLAKE3, LZ4, libsodium's AES-GCM) are vendored in `third_party/`.
 
 ```
-scripts/build.sh            # prints the build directory; the binary is backu in it
+scripts/build.sh            # prints the build directory; the binary is bu in it
 scripts/test.sh             # unit and integration tests (sqlite3 CLI optional)
 ```
 
 Requires a CPU with AES-NI, PCLMULQDQ and AVX (every x86-64 since ~2011);
-backu says so by name if yours lacks one.
+bu says so by name if yours lacks one.
 
 ## Use
 
 ```sh
-(umask 077; backu keygen > ~/.backu.key)   # keep it safe, and NOT next to the backups
+(umask 077; bu keygen > ~/.bu.key)   # keep it safe, and NOT next to the backups
 
 # full backup, then increments from the index
-backu create --key ~/.backu.key --index-out data.idx ~/data > full.bk
-backu create --key ~/.backu.key --base data.idx --index-out data.idx ~/data > inc1.bk
+bu create --key ~/.bu.key --index-out data.idx ~/data > full.bk
+bu create --key ~/.bu.key --base data.idx --index-out data.idx ~/data > inc1.bk
 
 # straight to S3, keeping the new index only if the upload succeeded
 set -o pipefail
-backu create --key ~/.backu.key --base data.idx --index-out data.idx.new ~/data \
+bu create --key ~/.bu.key --base data.idx --index-out data.idx.new ~/data \
     | aws s3 cp - "s3://my-bucket/data-$(date +%F).bk" && mv data.idx.new data.idx
 
 # restore the latest state of a chain (any order), every chunk verified
-backu restore --key ~/.backu.key -C /restore full.bk inc1.bk inc2.bk
+bu restore --key ~/.bu.key -C /restore full.bk inc1.bk inc2.bk
 
 # roll the chain forward: one file replaces two
-backu merge --key ~/.backu.key full.bk inc1.bk > full2.bk && rm full.bk inc1.bk
+bu merge --key ~/.bu.key full.bk inc1.bk > full2.bk && rm full.bk inc1.bk
 
-backu check --key ~/.backu.key full2.bk inc2.bk    # authenticate everything
-backu list  --key ~/.backu.key full2.bk inc2.bk    # what is in there
-backu index --key ~/.backu.key -o data.idx full2.bk inc2.bk   # lost the index?
+bu check --key ~/.bu.key full2.bk inc2.bk    # authenticate everything
+bu list  --key ~/.bu.key full2.bk inc2.bk    # what is in there
+bu index --key ~/.bu.key -o data.idx full2.bk inc2.bk   # lost the index?
 ```
 
 SQLite: back up a consistent copy (`sqlite3 app.db ".backup app-copy.db"` or
 the backup API), not a database that is being written to.
 
-`backu help` lists every option. Exit status: 0 ok, 1 failure (or `create`
+`bu help` lists every option. Exit status: 0 ok, 1 failure (or `create`
 finished with warnings — unreadable files were left out, the backup is still
 valid), 2 usage error.
 

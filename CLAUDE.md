@@ -1,8 +1,7 @@
 # CLAUDE.md
 
-backu is a small command-line backup tool: deduplicated, compressed,
-authenticated-encrypted incremental backups, streamed to stdout as a Unix
-filter, in one native binary. Read `docs/design.md` before changing behaviour
+bu — backup utility: encrypted, deduplicating, incremental backups as a Unix
+filter, in one small native binary. Read `docs/design.md` before changing behaviour
 and `docs/format.md` before touching anything that reads or writes bytes on
 disk.
 
@@ -16,7 +15,7 @@ scripts/bench.sh [--size-mb N] [--dir DIR]         # throughput, increments
 ```
 
 C++20, clang, CMake + Ninja, Linux x86-64 only. The build directory lives
-outside the tree (`~/.cache/backu-build-*`), keyed on the source path and the
+outside the tree (`~/.cache/bu-build-*`), keyed on the source path and the
 configuration.
 
 ## Hard rules
@@ -47,7 +46,7 @@ configuration.
    the caller's `-Oz`. Report the size (`scripts/size_report.sh`) when a change
    moves it by more than a couple of KB, and never trade throughput for bytes.
 6. **Never roll your own cryptography.** Primitives come from vendored,
-   upstream-verbatim sources (third_party/README). backu only composes them,
+   upstream-verbatim sources (third_party/README). bu only composes them,
    and every composition is documented in `docs/design.md` §Crypto. Any change
    to key derivation, nonces or associated data is a format change: bump the
    version, update `docs/format.md`, add a test that old files are refused.
@@ -71,7 +70,7 @@ configuration.
     valueless or out-of-range options exit 2 with the option named; runtime
     failures exit 1; success 0. `create` with warnings (unreadable files) exits
     1 but leaves a valid backup and index.
-12. **No network code.** backu reads and writes files and stdio. S3, SSH and
+12. **No network code.** bu reads and writes files and stdio. S3, SSH and
     the like are the caller's pipe.
 
 ## Conventions

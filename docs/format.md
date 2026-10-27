@@ -1,4 +1,4 @@
-# backu file format, version 1
+# bu file format, version 1
 
 Three kinds of file: the **key file**, **backup files** and **index files**.
 Backups and indexes share one container format. All integers are
@@ -15,7 +15,7 @@ records, trailer), `src/format/codec.cpp` (payloads), `src/format/snapshot.cpp`
 One line of ASCII:
 
 ```
-backu-key-1 <64 lowercase hex digits>\n
+bu-key-1 <64 lowercase hex digits>\n
 ```
 
 The 32 bytes are the **master key** `K`. It never encrypts anything itself;
@@ -24,9 +24,9 @@ part of the format and never change within a version):
 
 | Key | Derivation | Used for |
 |---|---|---|
-| `K_id` | `derive_key("backu 2026-10-25 chunk id v1", K)` | chunk IDs (keyed BLAKE3) |
-| `K_aes(salt)` | `derive_key("backu 2026-10-25 container aes-256-gcm key v1", K ‖ salt)` | AES-256-GCM key of one container |
-| `K_check(salt)` | `derive_key("backu 2026-10-25 container header check v1", K ‖ salt)` | header check value |
+| `K_id` | `derive_key("bu 2026-10-25 chunk id v1", K)` | chunk IDs (keyed BLAKE3) |
+| `K_aes(salt)` | `derive_key("bu 2026-10-25 container aes-256-gcm key v1", K ‖ salt)` | AES-256-GCM key of one container |
+| `K_check(salt)` | `derive_key("bu 2026-10-25 container header check v1", K ‖ salt)` | header check value |
 
 ## Container
 
@@ -41,7 +41,7 @@ end-16  16    footer
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 8 | magic `42 41 43 4b 55 0d 0a 1a` (`BACKU\r\n^Z`) |
+| 0 | 8 | magic `42 55 42 41 4b 0d 0a 1a` (`BUBAK\r\n^Z`) |
 | 8 | 2 | format version, `1` |
 | 10 | 2 | kind: `1` backup, `2` index |
 | 12 | 4 | reserved, `0` |

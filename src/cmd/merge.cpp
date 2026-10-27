@@ -1,4 +1,4 @@
-// merge.cpp — `backu merge`: roll a chain forward into one self-contained file.
+// merge.cpp — `bu merge`: roll a chain forward into one self-contained file.
 //
 // SEMANTICS (docs/design.md §Merge). The output holds exactly ONE snapshot —
 // the chain's latest — fully expanded (no parent), and exactly the chunks that
@@ -77,8 +77,8 @@ void mergeTask(void* ctx, u32 i, u32 worker) {
 int cmdMerge(int argc, char** argv, int first) {
     Args a;
     if (!argsParse("merge", argc, argv, first, kArgKey | kArgJobs | kArgVerbose, a)) return kExitUsage;
-    if (a.positional.count == 0) { fprintf(stderr, "backu merge: name the backup files to merge (oldest first is customary)\n"); return kExitUsage; }
-    if (isatty(1)) { fprintf(stderr, "backu merge: refusing to write a backup to a terminal; redirect stdout\n"); return kExitUsage; }
+    if (a.positional.count == 0) { fprintf(stderr, "bu merge: name the backup files to merge (oldest first is customary)\n"); return kExitUsage; }
+    if (isatty(1)) { fprintf(stderr, "bu merge: refusing to write a backup to a terminal; redirect stdout\n"); return kExitUsage; }
     signal(SIGPIPE, SIG_IGN);
 
     String err;
@@ -102,7 +102,7 @@ int cmdMerge(int argc, char** argv, int first) {
     for (u32 i = 0; i < d.distinct.count; ++i)
         if (!chainFind(chain, d.distinct[i], all[i].file, all[i].chunk)) ++missing;
     if (missing) {
-        fprintf(stderr, "backu: %u chunks of the latest snapshot are in none of the given files; "
+        fprintf(stderr, "bu: %u chunks of the latest snapshot are in none of the given files; "
                         "merge needs the chain back to a full backup\n", missing);
         return kExitRuntime;
     }
@@ -137,8 +137,8 @@ int cmdMerge(int argc, char** argv, int first) {
     pool.shutdown();
     b.mu.destroy();
     if (!ok) {
-        if (out.failed) fprintf(stderr, "backu: writing the merged backup failed: %s\n", strerror(out.savedErrno));
-        fprintf(stderr, "backu: merge FAILED; discard the partial output\n");
+        if (out.failed) fprintf(stderr, "bu: writing the merged backup failed: %s\n", strerror(out.savedErrno));
+        fprintf(stderr, "bu: merge FAILED; discard the partial output\n");
         return kExitRuntime;
     }
 
@@ -147,7 +147,7 @@ int cmdMerge(int argc, char** argv, int first) {
     snapshotEncode(d.snap, nullptr, manifest);
     if (!writerFinish(cw, manifest.buf.ptr, manifest.buf.count, err)) { report(err); return kExitRuntime; }
     if (a.verbose)
-        fprintf(stderr, "backu: merged %u files into one: snapshot generation %llu, %u chunks, %llu bytes\n",
+        fprintf(stderr, "bu: merged %u files into one: snapshot generation %llu, %u chunks, %llu bytes\n",
                 chain.files.count, (unsigned long long)d.snap.gen, all.count, (unsigned long long)out.written);
     return kExitOk;
 }

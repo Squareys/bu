@@ -2,7 +2,7 @@
  * references, so that ONE file of libsodium can be vendored instead of the
  * library.
  *
- * Not upstream code (written for backu, MIT like the rest of src/). The real
+ * Not upstream code (written for bu, MIT like the rest of src/). The real
  * definitions live in libsodium's core.c, utils.c, verify.c and runtime.c,
  * which drag in the whole init/RNG machinery; the AES-GCM file only needs:
  *
@@ -13,7 +13,7 @@
  *   crypto_verify_16()    constant-time tag compare (same OR-accumulate shape
  *                         as upstream's portable path).
  *   sodium_runtime_has_*  only reached through crypto_aead_aes256gcm_is_available,
- *                         which backu does not call (src/crypto/crypto.cpp asks
+ *                         which bu does not call (src/crypto/crypto.cpp asks
  *                         the CPU itself, and --gc-sections drops both). Answered
  *                         from CPUID anyway so the symbols are truthful if linked;
  *                         not __builtin_cpu_supports, which would pull in
