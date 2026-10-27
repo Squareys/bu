@@ -56,5 +56,6 @@ expect_fail() {   # expect_fail PATTERN cmd...
 # Every test gets a key file with a cheap slot (8 MiB, one pass: a real
 # slot costs seconds per unlock) and its passphrase in `pass`, which every
 # command reads with --passphrase-file: there is no terminal here.
-printf 'integration test passphrase\n' > pass
+# Mode 600: a passphrase file others can read is warned about.
+(umask 077; printf 'integration test passphrase\n' > pass)
 "$BU" key init --passphrase-file pass --kdf-memory 8 --kdf-time 1 key 2>/dev/null

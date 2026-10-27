@@ -17,7 +17,21 @@
 // component with O_NOFOLLOW from the restore directory's fd, so a symlink in
 // the restored tree — or one an attacker planted in the target directory —
 // can never redirect a write outside it. Restored symlinks are created as
-// links, never followed.
+// links, never followed. A name that already exists in the target is
+// unlinked and created anew (O_EXCL): opening it with O_TRUNC would write
+// through a hard link planted there into a file outside the tree, and block
+// forever on a planted FIFO. Directory modes are set through a descriptor
+// opened O_NOFOLLOW, never by name, so a directory swapped for a symlink
+// between the check and the chmod cannot pass the chmod on to its target.
+// The symlink branch needs no such care: unlinkat with no flags removes a
+// link rather than following it, symlinkat fails on any name that reappears,
+// and chown and utimens are called with AT_SYMLINK_NOFOLLOW.
+//
+// Set-uid and set-gid bits on regular files are restored only when running
+// as root, as GNU tar does: for anyone else they would make a file from the
+// backup run with the restoring user's identity, which is not something a
+// restore should hand out. A directory's set-gid bit (group inheritance, no
+// privilege) is kept.
 
 #include "cmd/args.hpp"
 #include "cmd/chain.hpp"
@@ -149,6 +163,22 @@ void entryError(Restorer& r, const Entry& e, StringView what) {
     ++r.errors;
 }
 
+// The mode a regular file is given: set-uid/set-gid only for root (above).
+u32 fileMode(const Restorer& r, const Entry& e) { return r.chown ? e.mode : e.mode & ~u32(06000); }
+
+// chmod a directory entry that was a directory a moment ago, through an fd
+// opened O_NOFOLLOW | O_DIRECTORY (a symlink or anything else put there since
+// is refused, never followed). A directory we may not read cannot be opened
+// that way; for it, fchmodat with AT_SYMLINK_NOFOLLOW (glibc >= 2.32 does it
+// through an O_PATH descriptor, so it is not a second lookup by name either).
+bool chmodDirAt(int pfd, const char* name, u32 mode) {
+    const int fd = openat(pfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno == EACCES && fchmodat(pfd, name, mode_t(mode), AT_SYMLINK_NOFOLLOW) == 0;
+    const bool ok = fchmod(fd, mode_t(mode)) == 0;
+    close(fd);
+    return ok;
+}
+
 void timesOf(const Entry& e, struct timespec ts[2]) {
     ts[0].tv_sec = e.mtimeNs / 1000000000; ts[0].tv_nsec = e.mtimeNs % 1000000000;
     if (ts[0].tv_nsec < 0) { ts[0].tv_nsec += 1000000000; ts[0].tv_sec -= 1; }
@@ -169,7 +199,7 @@ bool flushBatch(Restorer& r) {
         // Owner before mode: chown clears set-uid/set-gid bits, so the mode
         // must be applied after it to survive.
         if (r.chown && fchown(fd, e.uid, e.gid) != 0) entryError(r, e, StringView(strerror(errno)));
-        if (fchmod(fd, e.mode) != 0) entryError(r, e, StringView(strerror(errno)));
+        if (fchmod(fd, mode_t(fileMode(r, e))) != 0) entryError(r, e, StringView(strerror(errno)));
         if (futimens(fd, ts) != 0) entryError(r, e, StringView(strerror(errno)));
         if (close(fd) != 0) { entryError(r, e, StringView(strerror(errno))); ok = false; }
     }
@@ -179,7 +209,13 @@ bool flushBatch(Restorer& r) {
 
 bool restoreFile(Restorer& r, u32 ei, int pfd, const char* name) {
     const Entry& e = r.snap->entries[ei];
-    const int fd = openat(pfd, name, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    // Replace, never open, what is there (see the top of the file). EISDIR
+    // leaves the directory alone; the O_EXCL create then reports EEXIST.
+    if (unlinkat(pfd, name, 0) != 0 && errno != ENOENT && errno != EISDIR) {
+        entryError(r, e, StringView(strerror(errno)));
+        return true;
+    }
+    const int fd = openat(pfd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) { entryError(r, e, StringView(strerror(errno))); return true; }
     if (ftruncate(fd, off_t(e.size)) != 0) { entryError(r, e, StringView(strerror(errno))); close(fd); return true; }
     Batch& b = r.batch;
@@ -263,7 +299,9 @@ int cmdRestore(int argc, char** argv, int first) {
             }
             // Directories get their final mode/mtime at the very end: writing
             // into one bumps its mtime, and a read-only mode would block us.
-            fchmodat(pfd, name.c_str(), 0700 | (e.mode & 0777), 0);
+            if (!chmodDirAt(pfd, name.c_str(), 0700 | (e.mode & 0777))) {
+                entryError(r, e, "replaced while being restored, or its mode cannot be set"_s); continue;
+            }
             dirsDone.push(i);
         } else if (e.type == kEntrySymlink) {
             unlinkat(pfd, name.c_str(), 0);
@@ -287,7 +325,7 @@ int cmdRestore(int argc, char** argv, int first) {
         if (pfd < 0) continue;
         name.assign(base);
         if (r.chown) fchownat(pfd, name.c_str(), e.uid, e.gid, AT_SYMLINK_NOFOLLOW);
-        fchmodat(pfd, name.c_str(), e.mode, 0);
+        if (!chmodDirAt(pfd, name.c_str(), e.mode)) entryError(r, e, "cannot set the directory's mode"_s);
         struct timespec ts[2];
         timesOf(e, ts);
         utimensat(pfd, name.c_str(), ts, AT_SYMLINK_NOFOLLOW);

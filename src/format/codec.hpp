@@ -11,7 +11,8 @@
 // the input is stored as is. Already-compressed data (JPEG, zstd, encrypted
 // files) therefore costs one LZ4 attempt and one byte, never growth. LZ4 is
 // the speed choice (docs/design.md §Compression): at ~700 MB/s per core it
-// is not the bottleneck behind disk I/O, where zstd would be.
+// is not the bottleneck behind disk I/O, where zstd would be. Payloads above
+// LZ4's ~2 GiB input limit are always stored.
 //
 // The one TU allowed to include lz4.h is codec.cpp.
 #pragma once

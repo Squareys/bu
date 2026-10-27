@@ -224,7 +224,15 @@ alternative; calibration was chosen because a fixed cost is too slow on a
 small ARM board and needlessly weak on a workstation. The price: a slot
 made on a fast machine unlocks proportionally slower on a slow one, and a
 1 GiB slot cannot be opened on a host with less free memory; such hosts
-want their own slot, added there or with `--kdf-memory`.
+want their own slot, added there or with `--kdf-memory`. Unlocking skips a
+slot whose memory cannot be allocated, with a warning naming it, and goes on
+to the others, so that host's own slot still opens.
+
+Parameters below RFC 9106's recommendations (under 64 MiB, or fewer than
+three passes below 2 GiB, its one-pass option) are allowed, since a small
+board may need them, but `bu key` warns when it writes such a slot and
+`bu key info` marks it "(weak)". Nobody else can lower a slot's parameters:
+they are in the AEAD's associated data.
 
 **Unattended runs.** Cron and server backups read the passphrase from
 `--passphrase-file PATH` (its first line) or `--passphrase-fd N`; there is no
@@ -232,17 +240,39 @@ raw-key slot type. One slot type keeps one code path and one thing to audit;
 a raw-key slot would amount to a second plaintext key file under another
 name, while a passphrase file on a server is the same exposure with the
 Argon2 cost still in front of offline guessing, and can be root-only or
-supplied by a secret manager through a descriptor. Interactively the
+supplied by a secret manager through a descriptor. A passphrase file that
+group or others can access is warned about, as a key file is (`bu key info`
+included). Interactively the
 passphrase is read from `/dev/tty` with echo off (stdin and stdout carry
 backup data), never from an environment variable (visible in
 `/proc/PID/environ`, inherited by children) or an argument (visible in `ps`).
 Without a terminal or a source the command fails and names the flags.
+Ctrl-Z is held back while echo is off and stops bu once the terminal is
+restored, so a suspended bu never leaves the shell silent.
+
+**Rewriting the file.** `key add`, `passwd` and `remove` replace the whole
+file: a new file beside it under a random name, created with `O_EXCL` and
+`O_NOFOLLOW` and mode 0600, fsynced, renamed over the old one, and the
+directory fsynced so the rename survives a crash. A predictable temp name
+would let anyone who can write in the directory plant a symlink there and
+have bu write through it. A rename replaces a name, not the file behind it,
+so these commands refuse a key path that is a symlink or has other hard
+links (and say so before asking for a passphrase): the real file would keep
+its old slots, and a removed passphrase would go on opening it. Resolving
+the link and rewriting its target was the alternative; refusing was chosen
+because the target's directory may not be the user's to write and a
+rewrite should land where the user pointed. There is no lock: two key
+commands run at once on one file both start from the old slots and the
+later rename wins, losing the other's change. Key management is rare and
+interactive; a lock file would be one more thing to go stale.
 
 **Memory hygiene.** The passphrase, the KEK and its AES schedule, and `K` are
 wiped (`explicit_bzero`) on every path once used; `MasterKey` wipes itself on
-destruction. `mlock` is not used: `K` lives for the whole run and is
-expanded into per-container AES schedules on every worker thread, so locking
-only the passphrase buffer would protect the least valuable secret, and
+destruction, and so do the derived per-container keys (`Container`,
+`ContainerWriter`). `mlock` is not used: `K` lives for the whole run and is
+expanded into one AES schedule per container, which the worker threads read
+in place, so locking only the passphrase buffer would protect the least
+valuable secret, and
 locking all of it would need more than the default `RLIMIT_MEMLOCK`. Swap is
 the swap's to encrypt.
 
@@ -269,7 +299,9 @@ Each record's plaintext is either stored or one LZ4 block, chosen per record:
 LZ4 runs with its output capped below the input size, and if it does not
 shrink the payload, the payload is stored with a one-byte header. Incompressible
 data costs one fast LZ4 attempt (LZ4 bails out early on random data, ~11 GB/s)
-and one byte. LZ4 over zstd: at ~1.5 GB/s per core on text and ~6.5 GB/s
+and one byte. LZ4 counts in `int`, so a payload above its ~2 GiB input limit
+(only a metadata record can be that large) is always stored, and a reader
+refuses an LZ4 payload claiming more. LZ4 over zstd: at ~1.5 GB/s per core on text and ~6.5 GB/s
 decompressing it is never the bottleneck behind disk or network; zstd would
 compress logs better and halve create throughput.
 
@@ -364,8 +396,23 @@ sparse files stay sparse. Directories get their final mode and mtime last.
 Every path is resolved component by component with `O_NOFOLLOW` from the
 target directory's descriptor, missing parents are created, and symlinks are
 created as links, never followed — a symlink in the restored tree or planted
-in the target cannot redirect a write. Ownership is restored when running as
-root; set-uid bits are applied after chown.
+in the target cannot redirect a write. A name that already exists where a
+file is restored is unlinked and created anew with `O_EXCL`, never opened:
+opening it would write through a hard link planted there to a file outside
+the tree, or block on a planted FIFO. Directory modes are set through a
+descriptor opened `O_NOFOLLOW | O_DIRECTORY`, so a directory swapped for a
+symlink after the check cannot pass the chmod on.
+
+Ownership is restored when running as root; set-uid bits are applied after
+chown. Set-uid and set-gid bits on files are restored only for root, as GNU
+tar does: for another user they would make a file from the backup run with
+that user's identity. A directory's set-gid bit (group inheritance, no
+privilege) is kept.
+
+`list` prints names and symlink targets with control bytes escaped (`\n`,
+`\t`, `\r`, `\xHH`, and `\\` for a backslash): a file name may hold any
+byte but `/` and NUL, and one carrying escape sequences must not drive the
+terminal of whoever lists the backup.
 
 `check` authenticates every record of every file, re-hashes every chunk,
 resolves every snapshot and confirms every reference is present.
@@ -458,7 +505,7 @@ merge: 3.0 GB/s.
 
 ## 10. Size
 
-Stripped binary: **231 216 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **234 344 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
@@ -466,9 +513,9 @@ glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 | BLAKE3 (portable + SSE4.1 + AVX2 + AVX-512, -O3) | 64 114 |
 | Argon2id + BLAKE2b (libsodium, ref + SSSE3 + AVX2 + AVX-512F kernels, -O3) | 32 377 |
 | AES-256-GCM (libsodium AES-NI, -O3) | 21 236 |
-| LZ4 (inlined into codecEncode/codecDecode) | 8 768 |
+| LZ4 (inlined into codecEncode/codecDecode) | 8 510 |
 | bu hot path (-O2) | 4 105 |
-| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 74 599 |
+| bu cold path: CLI, key file, walk, pipeline, manifest, restore, merge (-Oz) | 76 967 |
 | crt and runtime glue | 5 203 |
 
 The remaining ~21 KB of the file are ELF headers, dynamic-linking tables
@@ -478,7 +525,9 @@ section alignment.
 The passphrase key file (§3) added 56 KB: 32 KB of Argon2id and BLAKE2b and
 18 KB of key-file, passphrase and `bu key` code and help text. The Argon2
 SIMD kernels stay: unlock time is a security parameter, and a faster kernel
-buys more passes or memory in the same two seconds.
+buys more passes or memory in the same two seconds. The security fixes
+after it (safe temp files, restore hardening, escaped listings, warnings)
+added 3 KB of cold code.
 
 The size rule is "small by default, speed wins on hot paths", so the budget
 went to the SIMD variants: the AVX-512 BLAKE3 kernel alone is 21 KB, and
@@ -542,7 +591,10 @@ strong passphrase is what makes that infeasible. Someone who has a
 passphrase but no copy of the key file has nothing. Losing every copy of the
 key file makes every backup unreadable, by design. Removing a passphrase
 edits one copy of the file: an older copy still accepts it, as an old LUKS
-header backup does.
+header backup does. So `key remove` and `key passwd` do not revoke anything
+from someone who may already hold a copy of the file and the old
+passphrase: against them only a new key (`bu key init`) and a new full
+backup help, since `K` itself is what they can recover.
 
 ## 12. Deliberate omissions
 

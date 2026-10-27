@@ -56,3 +56,18 @@ BK_TEST(codec_refuses_lying_and_truncated_payloads) {
     const u8 bogus[2] = {7, 0};
     BK_CHECK(!codecRawLength(bogus, 2, 65536, rawLen));          // unknown codec
 }
+
+BK_TEST(codec_sizes_beyond_lz4s_int_range_are_refused_not_wrapped) {
+    // Metadata records may reach 3 GiB; LZ4 counts in int. codecBound must
+    // not hand LZ4 a wrapped (negative) size, and a payload claiming an LZ4
+    // body or output above LZ4's limit is refused before any int cast.
+    const u32 big = 0x80000004u;
+    BK_CHECK_EQ(codecBound(big), big + 1);                   // stored, one header byte
+    BK_CHECK(codecBound(0x7E000000u) > 0x7E000000u);         // still LZ4's bound at the limit
+    u8 enc[64] = {kCodecLz4};
+    enc[1] = 0x04; enc[2] = 0x00; enc[3] = 0x00; enc[4] = 0x80;    // rawLen 0x80000004
+    u32 rawLen = 0;
+    BK_CHECK(codecRawLength(enc, sizeof enc, 0xffffffffu, rawLen) && rawLen == big);
+    u8 out[16];
+    BK_CHECK(!codecDecode(enc, sizeof enc, out, rawLen));     // refused, `out` never touched
+}

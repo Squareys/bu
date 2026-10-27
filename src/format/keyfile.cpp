@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -188,8 +189,10 @@ bool keyFileCreate(const Key& master, StringView pass, const KdfParams& kdf, Key
     return keyFileSetSlot(out, 0, master, pass, kdf, err);
 }
 
-bool keyFileUnlock(const KeyFile& f, StringView pass, Key& master, u32& slot, String& err) {
+bool keyFileUnlock(const KeyFile& f, StringView pass, Key& master, u32& slot, u32& kdfFailed, String& err) {
     u32 tried = 0, damaged = 0;
+    kdfFailed = 0;
+    String kdfWhy;
     for (u32 i = 0; i < kKeySlots; ++i) {
         KeySlotInfo info;
         keyFileSlot(f, i, info);
@@ -198,7 +201,7 @@ bool keyFileUnlock(const KeyFile& f, StringView pass, Key& master, u32& slot, St
         ++tried;
         const u8* s = slotPtr(f, i);
         AeadKey st;
-        if (!slotKek(pass, s + kOffSalt, info.kdf, st, err)) return false;
+        if (!slotKek(pass, s + kOffSalt, info.kdf, st, kdfWhy)) { kdfFailed |= 1u << i; continue; }
         u8 aad[kAadBytes];
         slotAad(f, i, aad);
         const bool ok = aeadOpen(st, s + kOffNonce, aad, sizeof aad, s + kSlotParamBytes, kKeyBytes, master.b);
@@ -215,9 +218,20 @@ bool keyFileUnlock(const KeyFile& f, StringView pass, Key& master, u32& slot, St
     }
     if (tried == 0)
         return errSet(err, damaged ? "every key slot is damaged" : "damaged key file (no key slot in use)");
+    if (kdfFailed) {
+        u32 n = 0;
+        for (u32 m = kdfFailed; m; m &= m - 1) ++n;
+        if (n == tried) return errSet(err, "no key slot could be tried: ", kdfWhy.view());
+        return errSet(err, "wrong passphrase, or one of the slots that could not be tried (", kdfWhy.view(), ")");
+    }
     if (damaged)
         return errSet(err, "wrong passphrase (damaged key slots were skipped; `bu key info` lists them)");
     return errSet(err, "wrong passphrase");
+}
+
+bool kdfParamsWeak(const KdfParams& k) {
+    const u32 mib = k.memKiB >> 10;
+    return mib < kKdfWeakMemMiB || (k.passes < kKdfWeakPasses && mib < kKdfWeakOnePassMemMiB);
 }
 
 u32 kdfAutoMemMiB() {
@@ -302,7 +316,22 @@ bool keyFileWriteNew(const char* path, const KeyFile& f, String& err) {
     return true;
 }
 
+bool keyFileCheckReplaceable(const char* path, String& err) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return errSet(err, path, ": ", strerror(errno));
+    if (S_ISLNK(st.st_mode))
+        return errSet(err, path, ": is a symbolic link; bu replaces a key file by renaming a new one over it, "
+                                 "which would replace the link and leave the file it points to unchanged; "
+                                 "name the file itself (realpath ", path, ")");
+    if (!S_ISREG(st.st_mode)) return errSet(err, path, ": not a regular file");
+    if (st.st_nlink > 1)
+        return errSet(err, path, ": has other hard links; replacing it would leave them with the old slots; "
+                                 "remove the other names or work on a copy");
+    return true;
+}
+
 bool keyFileReplace(const char* path, const KeyFile& f, String& err) {
+    if (!keyFileCheckReplaceable(path, err)) return false;
     return writeFileAtomic(path, f.bytes, kKeyFileBytes, err);
 }
 
