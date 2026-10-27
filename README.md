@@ -75,6 +75,8 @@ valid), 2 usage error.
 
 ## Licence
 
-MIT (see [LICENSE](LICENSE)). Vendored code keeps its own licence: BLAKE3
-(CC0-1.0 / Apache-2.0), LZ4 (BSD-2-Clause), libsodium (ISC); see
-[third_party/README](third_party/README).
+MIT, copyright (c) 2026 Jonathan Hale; see [LICENSE](LICENSE). Vendored code in
+`third_party/` keeps its own licence, with the licence file beside it: BLAKE3
+1.8.7 (CC0-1.0, or Apache-2.0, or Apache-2.0 WITH LLVM-exception), LZ4 1.10.0
+(BSD-2-Clause), libsodium 1.0.22 (ISC). A binary contains code from all three,
+so keep their notices with it. Details: [third_party/README](third_party/README).

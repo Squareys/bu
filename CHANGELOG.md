@@ -13,6 +13,9 @@ own version number (docs/format.md); a release that changes it says so.
   (`BU_BUILD_ROOT`). The file magic (`BUBAK\r\n^Z`) and the BLAKE3
   `derive_key` contexts now name bu, so files and keys made before the rename
   are not readable; the format version stays 1 (no backups existed yet).
+- Licensing spelled out in the README: bu is MIT (`LICENSE`); vendored BLAKE3
+  (CC0-1.0 / Apache-2.0), LZ4 (BSD-2-Clause) and libsodium (ISC) keep their
+  own licences.
 
 ## [0.1.0] — 2026-10-25
 
