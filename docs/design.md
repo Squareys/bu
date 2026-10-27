@@ -419,20 +419,29 @@ resolves every snapshot and confirms every reference is present.
 
 ## 9. Parallelism, I/O and performance
 
-`create` is a pipeline with bounded memory (~12 MiB of read blocks plus
+`create` is a pipeline with bounded memory (~16 MiB of read blocks plus
 ~65 KiB per job slot, 4 slots per worker):
 
 1. **walk** (main thread): `fdopendir`/`readdir` (getdents64) and `fstatat`
    relative to directory fds, children sorted by name; the files cache is
    applied here.
-2. **readers** (up to 4): claim `(file, offset)` ranges in walk order with the
+2. **readers** (up to 8): claim `(file, offset)` ranges in walk order with the
    next ring slot, `pread` 1 MiB plus the 63 bytes CDC needs before it,
    `posix_fadvise` SEQUENTIAL on open and DONTNEED on each range after reading
    (a backup should not evict everybody else's page cache), `O_NOATIME` when
    permitted (silently dropped after the first EPERM), `openat` relative to a
    cached directory fd. Several readers keep several reads in flight (NVMe
    wants queue depth; many small files want their opens overlapped) and run
-   CDC phase 1 while the block is hot in cache.
+   CDC phase 1 while the block is hot in cache. A reader scans as well as
+   reads, so it keeps less than one read in flight on average: on an NVMe,
+   8 readers made a full backup of a tree of small files 1.3-1.4× faster
+   than 4, and of one big file 1.4× (with the ring grown from 12 to 16
+   blocks to feed them); on tmpfs the extra readers cost ~3%. A big file is
+   read as 1 MiB ranges handed out in turn, so each reader's descriptor
+   sees a strided pattern; that did not defeat the kernel's readahead
+   (four threads reading 1 MiB ranges in turn from separate descriptors
+   read a cold file within 6% of four contiguous extents), so the ranges
+   stay as they are.
 3. **chunker**: takes blocks strictly in ring order, moves the previous
    block's short tail into the new block's headroom, selects cuts, numbers
    chunks. No file data is copied: jobs point into the blocks, which are

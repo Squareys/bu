@@ -67,7 +67,7 @@ const char kHelp[] =
 "--passphrase-file or --passphrase-fd).\n"
 "\n"
 "-j N sets the worker threads (default: online CPUs; restore: at most 8);\n"
-"create adds up to four reader threads, a chunker and a writer. Exit status:\n"
+"create adds up to eight reader threads, a chunker and a writer. Exit status:\n"
 "0 ok; 1 failure, or create finished with warnings (unreadable files were\n"
 "left out; the backup and index are still valid); 2 usage error.\n"
 "\n"

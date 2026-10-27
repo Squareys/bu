@@ -5,10 +5,11 @@
 // stages connected by bounded rings, so memory is capped no matter how big
 // the tree is:
 //
-//   reader (1 thread)   large sequential read()s (kReadBlock) into a ring of
-//                       kBlocks reused buffers; posix_fadvise SEQUENTIAL before
-//                       and DONTNEED after each file; O_NOATIME when allowed;
-//                       openat relative to a cached directory fd.
+//   readers (up to 8)   1 MiB preads (kReadBlock) into a ring of kBlocks
+//                       reused buffers, CDC phase 1 on each; posix_fadvise
+//                       SEQUENTIAL before and DONTNEED after each range;
+//                       O_NOATIME when allowed; openat relative to a cached
+//                       directory fd.
 //   chunker (1 thread)  moves the previous block's short tail in front of the
 //                       new block and cuts chunks (FastCDC or SQLite pages),
 //                       numbering them 0, 1, 2, ...; jobs point INTO the block.
@@ -61,7 +62,8 @@ namespace bk {
 namespace {
 
 constexpr u32 kReadBlock = 1u << 20;   // one read() per MiB: syscall cost vanishes, and a block stays cache-resident until workers are done with it
-constexpr u32 kBlocks = 12;            // 12 MiB in flight: readers run ahead while workers still read older blocks
+constexpr u32 kBlocks = 16;            // 16 MiB in flight: readers run ahead while workers still read older blocks
+constexpr u32 kMaxReaders = 8;
 constexpr i64 kRaceGuardNs = 1000000000;
 
 // ---- the walk ---------------------------------------------------------------
@@ -781,9 +783,14 @@ int cmdCreate(int argc, char** argv, int first) {
     // stays at ~65 KiB per slot (one sealed-record buffer; raw data stays in
     // the read blocks).
     p.slots = workers * 4 + 8;
-    // Readers: enough to keep a few reads in flight and the CDC scan (about a
-    // fifth of the per-byte work) ahead of the workers.
-    const u32 readers = min<u32>(4, max<u32>(1, (workers + 1) / 2));
+    // Readers: enough to keep reads in flight and the CDC scan (about a fifth
+    // of the per-byte work) ahead of the workers. A reader spends part of its
+    // time scanning, not waiting on the disk, so it takes more readers than
+    // the queue depth the disk wants: on an NVMe, 8 instead of 4 made a full
+    // backup of a tree of small files 1.3-1.4x faster and of one big file
+    // 1.4x, while on tmpfs the extra four cost ~3% (docs/benchmarks.md).
+    // More than 8 measured no better.
+    const u32 readers = min<u32>(kMaxReaders, max<u32>(1, (workers + 1) / 2));
     const u32 recCap = codecBound(kMaxChunk) + kRecordOverhead;
     Array<u8> jobMem;
     jobMem.resize(p.slots * recCap);

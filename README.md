@@ -228,8 +228,8 @@ with the merged file.
 | `bu help` | Print usage. |
 
 `-j N` sets the worker threads (default: online CPUs; `restore`: at most 8);
-`create` adds up to four reader threads, a chunker and a writer. bu refuses unknown, repeated or
-malformed options by name.
+`create` adds up to eight reader threads, a chunker and a writer. bu refuses
+unknown, repeated or malformed options by name.
 
 **Passphrases.** Each command that unlocks the key file (the commands above
 with `--key`, plus `key add`, `passwd` and `remove`) reads the passphrase from

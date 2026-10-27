@@ -53,6 +53,9 @@ own version number (docs/format.md); a release that changes it says so.
   creates the next batch's files while the current batch is written, and
   defaults to 8 threads (`-j` still overrides): about 1.6× faster to the
   same NVMe, at half the CPU.
+- `bu create` runs up to 8 reader threads (was 4) and a 16 MiB read ring
+  (was 12 MiB): a full backup from an NVMe is about 1.2-1.4× faster; on
+  tmpfs the change costs ~3%.
 
 ### Changed
 - **Key file format 2: a random master key in passphrase keyslots (the LUKS
