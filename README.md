@@ -227,8 +227,8 @@ with the merged file.
 | `bu index --key KEYFILE -o INDEX BACKUP...` | Rebuild a lost index, files cache included, from the chain. |
 | `bu help` | Print usage. |
 
-`-j N` sets the worker threads (default: online CPUs); `create` adds up to
-four reader threads, a chunker and a writer. bu refuses unknown, repeated or
+`-j N` sets the worker threads (default: online CPUs; `restore`: at most 8);
+`create` adds up to four reader threads, a chunker and a writer. bu refuses unknown, repeated or
 malformed options by name.
 
 **Passphrases.** Each command that unlocks the key file (the commands above

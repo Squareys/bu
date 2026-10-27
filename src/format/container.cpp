@@ -215,21 +215,65 @@ bool containerReadMeta(const Container& c, u64 offset, u32 len, u8 type, u64 non
     return true;
 }
 
-bool containerReadChunkPayload(const MasterKey& k, const Container& c, const ChunkLoc& loc,
-                               Array<u8>& scratch, Array<u8>& payload, Array<u8>& raw, String& err) {
-    if (!readRecord(c, loc.offset, loc.recLen, kRecChunk, loc.nonce, &loc.id, scratch, payload, err)) return false;
+namespace {
+
+// Decode an authenticated chunk payload into out (loc.rawLen bytes) and check
+// that its keyed hash is the ID it was filed under.
+bool decodeChunk(const MasterKey& k, const Container& c, const ChunkLoc& loc, const Array<u8>& payload, u8* out,
+                 String& err) {
     u32 rawLen = 0;
     if (!codecRawLength(payload.ptr, payload.count, kMaxChunk, rawLen) || rawLen != loc.rawLen)
         return fail(err, c, "chunk payload length does not match the chunk table");
-    raw.resize(rawLen);
-    if (!codecDecode(payload.ptr, payload.count, raw.ptr, rawLen)) return fail(err, c, "chunk does not decompress");
+    if (!codecDecode(payload.ptr, payload.count, out, rawLen)) return fail(err, c, "chunk does not decompress");
     // GCM proved the record is the one this file sealed under this ID; the
     // keyed hash proves the ID is the content's. Both, because the second is
     // what makes dedupe across files trustworthy (merge copies by ID).
     ChunkId got;
-    chunkIdOf(k, raw.ptr, rawLen, got);
+    chunkIdOf(k, out, rawLen, got);
     if (!idEqual(got, loc.id)) return fail(err, c, "chunk content does not match its ID");
     return true;
+}
+
+} // namespace
+
+bool containerReadChunkPayload(const MasterKey& k, const Container& c, const ChunkLoc& loc,
+                               Array<u8>& scratch, Array<u8>& payload, Array<u8>& raw, String& err) {
+    if (!readRecord(c, loc.offset, loc.recLen, kRecChunk, loc.nonce, &loc.id, scratch, payload, err)) return false;
+    raw.resize(loc.rawLen);
+    return decodeChunk(k, c, loc, payload, raw.ptr, err);
+}
+
+u64 containerSpanBytes(const Container& c, u32 first, u32 count) {
+    const ChunkLoc& last = c.chunks[first + count - 1];
+    return last.offset + 4 + u64(last.recLen) - c.chunks[first].offset;
+}
+
+void containerPrefetchSpan(const Container& c, u32 first, u32 count) {
+    posix_fadvise(c.fd, off_t(c.chunks[first].offset), off_t(containerSpanBytes(c, first, count)), POSIX_FADV_WILLNEED);
+}
+
+bool containerReadSpan(const Container& c, u32 first, u32 count, Array<u8>& span, String& err) {
+    const u64 off = c.chunks[first].offset;
+    const u64 n = containerSpanBytes(c, first, count);
+    if (off + n > c.fileSize || n > (u64(1) << 31)) return fail(err, c, "record outside the file (truncated or damaged)");
+    span.resize(u32(n));
+    if (!preadFull(c.fd, span.ptr, usize(n), off, err)) return fail(err, c, err.view());
+    return true;
+}
+
+bool containerOpenChunk(const MasterKey& k, const Container& c, const ChunkLoc& loc, const u8* rec,
+                        Array<u8>& payload, u8* out, String& err) {
+    const u32 len = loc.recLen;
+    if (len < kTagBytes) return fail(err, c, "record outside the file (truncated or damaged)");
+    if (loadU32LE(rec) != len) return fail(err, c, "record length does not match the chunk table (damaged)");
+    payload.resize(len - kTagBytes);
+    if (!recordOpen(c.keys, loc.nonce, kRecChunk, &loc.id, rec + 4, len, payload.ptr)) {
+        String what("authentication failed for the record at offset ");
+        what.appendU64(loc.offset);
+        what.append(" — the file was modified or damaged");
+        return fail(err, c, what.view());
+    }
+    return decodeChunk(k, c, loc, payload, out, err);
 }
 
 bool containerReadChunk(const MasterKey& k, const Container& c, const ChunkLoc& loc,

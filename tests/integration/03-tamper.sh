@@ -20,8 +20,12 @@ flip() {   # flip FILE OFFSET -> copy with one byte inverted
 flip good.bk 100000
 expect_fail "authentication failed" "$BU" check --key key --passphrase-file pass bad.bk
 expect_fail "authentication failed" "$BU" restore --key key --passphrase-file pass -C out bad.bk
-# Restore must not report success for any part of it.
-[ ! -e out/src/t.bin ] || ! cmp -s out/src/t.bin src/t.bin || fail "tampered data restored intact?"
+# The damaged chunk is never written: whichever file it belongs to (n.txt
+# sorts first, so offset 100000 may be in either) cannot come back intact.
+# Undamaged files may: restore writes authenticated data as it goes, and
+# reports the failure for the whole tree.
+{ [ -e out/src/n.txt ] && cmp -s out/src/n.txt src/n.txt && [ -e out/src/t.bin ] && cmp -s out/src/t.bin src/t.bin; } \
+    && fail "tampered data restored intact?"
 
 # The format version: refused as such, before any key is tried.
 flip good.bk 8

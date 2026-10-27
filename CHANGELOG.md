@@ -44,6 +44,16 @@ own version number (docs/format.md); a release that changes it says so.
   per container (not one per thread).
 - Binary size 231 232 → 234 344 bytes.
 
+### Performance
+- `bu restore` and `bu check` read the backup in spans of consecutive
+  records (about 256 KiB per `pread`) and prefetch about 16 MiB ahead,
+  instead of one ~20 KiB record per `pread`. From a cold NVMe, `check` is
+  about 3× faster and now outruns a single sequential read of the backup.
+- `bu restore` writes runs of decoded chunks of one file with one `pwrite`,
+  creates the next batch's files while the current batch is written, and
+  defaults to 8 threads (`-j` still overrides): about 1.6× faster to the
+  same NVMe, at half the CPU.
+
 ### Changed
 - **Key file format 2: a random master key in passphrase keyslots (the LUKS
   design).** `bu key init KEYFILE` draws the 32-byte master key from

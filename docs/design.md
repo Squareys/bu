@@ -454,7 +454,29 @@ would cost size and complexity). Output goes through a 4 MiB buffer or
 `writev`, with EINTR and partial writes handled; SIGPIPE is ignored so a dead
 pipe reader is a reported error and the index is not updated.
 
-`restore`, `check` and `merge` use a thread pool over independent chunk tasks.
+`restore`, `check` and `merge` use a thread pool over independent tasks.
+`restore` and `check` read the backup in **spans**: runs of consecutive
+records (about 256 KiB) read with one `pread` and opened from memory. Each
+task also asks the kernel (`POSIX_FADV_WILLNEED`) for the span about 16 MiB
+ahead, so the disk keeps a deep queue of large reads whatever `-j` is.
+Reading one ~20 KiB record per `pread` from many threads at scattered
+offsets ran at half the disk's sequential speed; spans of 256 KiB measured
+better than 1-2 MiB (less CPU, and more tasks to spread over threads). A
+full backup restores as long runs of consecutive records because the
+snapshot lists chunks in the order `create` wrote them; deduplicated chunks
+and increments break the runs, and a chunk that does not continue the
+current span starts a new one. `merge` still reads one record at a time.
+
+`restore` gathers decoded chunks that continue each other in one output file
+into one `pwrite` (up to 1 MiB) and overlaps two batches of files: the main
+thread creates and sizes the next batch's files (a third of the wall time on
+ext4) while a finisher thread runs the current batch on the pool and then
+sets its files' owner, mode and times. Batches hold up to 4 096 files and
+1 GiB; restore raises the soft descriptor limit towards the hard one for
+that, and uses smaller batches when it cannot. It runs 8 threads unless
+`-j` says otherwise: with the prefetch, 8 read as fast as 20, and 20 threads
+writing into the page cache spent twice the kernel CPU for no gain in wall
+time.
 
 **Files that change underneath.** The backup is of the tree as walked: a file
 is read up to the size the walk saw. One that grew or shrank by the time it

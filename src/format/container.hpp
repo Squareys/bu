@@ -150,6 +150,37 @@ struct Container {
                                              Array<u8>& scratch, Array<u8>& payload, Array<u8>& raw,
                                              String& err);
 
+// Read the records of chunks [first, first + count) of a backup — consecutive
+// in the file by construction — with one pread into `span` (resized). Restore
+// and check read the backup this way, in spans of about kSpanBytes: one
+// ~20 KiB pread per record from many threads at scattered offsets left them
+// at half the speed of a sequential read of the same file.
+constexpr u32 kSpanBytes = 256u << 10;
+// The span size for `total` bytes of records read by `threads` threads:
+// kSpanBytes, or less when that would leave threads idle (small backups).
+inline u64 containerSpanTarget(u64 total, u32 threads) {
+    return min<u64>(kSpanBytes, max<u64>(u64(64) << 10, total / (u64(threads) * 4)));
+}
+[[nodiscard]] bool containerReadSpan(const Container& c, u32 first, u32 count, Array<u8>& span, String& err);
+// Ask the kernel to start reading a span now (POSIX_FADV_WILLNEED). A task
+// prefetches the span `containerPrefetchTasks` tasks ahead of its own, so
+// about kPrefetchBytes of reads stay queued whatever the thread count: on one
+// disk shared with the restore's writes, that queue depth is what keeps the
+// reads going.
+void containerPrefetchSpan(const Container& c, u32 first, u32 count);
+constexpr u64 kPrefetchBytes = u64(16) << 20;
+inline u32 containerPrefetchTasks(u64 spanTarget, u32 threads) {
+    return max<u32>(threads, u32(kPrefetchBytes / spanTarget));
+}
+// The bytes containerReadSpan reads for chunks [first, first + count).
+u64 containerSpanBytes(const Container& c, u32 first, u32 count);
+// Authenticate, decode and verify chunk `loc` from its record `rec` (length
+// prefix first, as read by containerReadSpan at rec - span = loc.offset -
+// chunks[first].offset). The decoded bytes go to `out`, which must hold
+// loc.rawLen bytes; `payload` is caller-owned scratch.
+[[nodiscard]] bool containerOpenChunk(const MasterKey& k, const Container& c, const ChunkLoc& loc, const u8* rec,
+                                      Array<u8>& payload, u8* out, String& err);
+
 // ---- writing a backup -----------------------------------------------------
 
 struct TrailerEntry {
