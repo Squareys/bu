@@ -34,6 +34,9 @@ file descriptors, so a chain can sit on a local disk or a network mount
   depend on the thread count: a full backup takes 2.8× as long as reading
   the data once (see [Performance](#performance)).
 
+**Status:** bu is new, and the file format may change before 1.0. Keep any
+backup you cannot afford to lose in a second tool as well.
+
 ## Contents
 
 - [Quick start](#quick-start)
@@ -383,6 +386,8 @@ bu does not roll its own primitives. BLAKE3, AES-256-GCM and Argon2id
 [docs/design.md §3](docs/design.md#3-cryptography) and
 [§11](docs/design.md#11-threat-model) document each composition.
 
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
+
 ## Limitations
 
 bu does not support (see
@@ -424,8 +429,11 @@ scripts/bench_io.sh --src DIR --dst DIR   # against the disk (docs/benchmarks.md
 
 The build directory lives outside the tree, in
 `~/.cache/bu-build-<config>-<hash>` (or under `$BU_BUILD_ROOT`). bu has no
-install step: copy `bu` wherever you like. The integration tests generate
-test data with `openssl` and skip the SQLite test without the `sqlite3` CLI.
+install step: copy `bu` wherever you like. Each
+[GitHub release](https://github.com/Squareys/bu/releases) also has a
+stripped Linux x86-64 binary with its SHA-256 checksum. The integration
+tests generate test data with `openssl` and skip the SQLite test without
+the `sqlite3` CLI.
 CI (GitHub Actions, `.github/workflows/ci.yml`) runs the smoke tests and
 the size report on a Release build, the full suite, and the full suite
 under `--asan` and `--tsan`.
@@ -439,6 +447,9 @@ under `--asan` and `--tsan`.
 - [docs/benchmarks.md](docs/benchmarks.md): bu against the disk, with raw
   read, raw write and copy baselines.
 - [CHANGELOG.md](CHANGELOG.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md): build, tests, code rules and commit
+  style for contributors.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability.
 
 ## Licence
 

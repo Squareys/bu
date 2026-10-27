@@ -7,8 +7,8 @@ contributors. Read it first, then `docs/design.md` before changing behaviour
 and `docs/format.md` before touching anything that reads or writes bytes on
 disk.
 
-- The hard rules are not style preferences. Do not work around one; ask
-  when one seems to block a task.
+- Treat the hard rules as binding. Do not work around one; ask when one
+  seems to block a task.
 - Say which test runs you did (plain, `--asan`, `--tsan`, `--smoke`) and
   their result when you report a change, and the size report when the
   binary moved.
