@@ -1,6 +1,6 @@
 # bu — deduplicated, compressed, authenticated-encrypted incremental backups
 # as one small native binary. Linux x86-64, clang, no STL in our own code (see
-# CLAUDE.md), no exceptions, no RTTI.
+# CONTRIBUTING.md), no exceptions, no RTTI.
 cmake_minimum_required(VERSION 3.20)
 project(bu VERSION 0.1.0 LANGUAGES C CXX)
 
@@ -25,7 +25,7 @@ option(BK_TSAN "Build with ThreadSanitizer (the create pipeline and the thread p
 
 # ---------------------------------------------------------------- flags ----
 #
-# THE SIZE RULE (CLAUDE.md): small by default, speed wins on hot paths. So the
+# THE SIZE RULE (CONTRIBUTING.md): small by default, speed wins on hot paths. So the
 # size work below is all of the kind that costs no speed — dead-code removal
 # (sections + --gc-sections), whole-program LTO (which also inlines across the
 # vendored libraries), no unwind tables (no exceptions means nothing unwinds),
@@ -170,7 +170,7 @@ set(BK_HOT_SOURCES
 # Cold: per-file or per-command work — argument parsing, the walk, manifest
 # coding, the pipeline's bookkeeping (its per-chunk work is calls into the hot
 # set). Built -Os: measured on this code it halves the size, and none of it is
-# where a backup spends its time (docs/design.md §Size has the numbers). With
+# where a backup spends its time (docs/design.md §10 has the numbers). With
 # LTO the optsize attribute travels with each function, so a cold caller does
 # not drag a hot callee down to -Os, nor the other way round.
 set(BK_COLD_SOURCES
