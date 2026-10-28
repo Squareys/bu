@@ -609,7 +609,15 @@ segment's table with the records that came before it.
 
 1. **walk** (main thread): `fdopendir`/`readdir` (getdents64) and `fstatat`
    relative to directory fds, children sorted by name; the files cache is
-   applied here.
+   applied here. `--exclude` patterns are matched (fnmatch) before an entry
+   is stat'ed, so an excluded directory costs one comparison per pattern and
+   is never opened; `-x` compares each entry's `st_dev` with its `PATH`'s
+   and stores a mount point as an empty directory without entering it.
+   `-C DIR` is an `fchdir` around the walk and the reads (the readers open
+   files by path relative to the working directory); the chain, `--base`,
+   the key and passphrase files are opened before it and `--index-out`
+   written after the `fchdir` back, so they stay relative to where bu was
+   started.
 2. **readers** (up to 8): claim `(file, offset)` ranges in walk order with the
    next ring slot, `pread` 1 MiB plus the 63 bytes CDC needs before it,
    `posix_fadvise` SEQUENTIAL on open and DONTNEED on each range after reading
@@ -689,8 +697,10 @@ time.
 is read up to the size the walk saw. One that grew or shrank by the time it
 is opened is backed up anyway (what is there, up to the walked size) with a
 "changed size" warning; one that cannot be opened or read is left out with a
-warning. Either way `create` exits 1 while the segment is complete and the
-chain valid, which is Borg's convention for "completed with warnings". A
+warning. Either way `create` exits 3 while the segment is complete and the
+chain valid. Borg uses 1 for "completed with warnings"; bu used to as well,
+but a cron job could then not tell a backup with a skipped file from no
+backup at all, so 1 now means only failure. A
 chain inside the tree it is backing up (`bu create x.bu .`) skips itself by
 inode, and an index location that cannot be written is refused before
 anything is read.
@@ -741,7 +751,7 @@ and create from 2.01 s to 1.69 s.
 
 ## 10. Size
 
-Stripped binary: **273 272 bytes** (Linux x86-64, dynamically linked against
+Stripped binary: **276 464 bytes** (Linux x86-64, dynamically linked against
 glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 
 | Component | Bytes |
@@ -751,8 +761,8 @@ glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 | AES-256-GCM (libsodium AES-NI, -O3) | 21 323 |
 | LZ4 (inlined into codecEncode/codecDecode) | 8 510 |
 | bu hot path (-O2) | 4 279 |
-| bu cold path: CLI, key file, walk, pipeline, chains, manifest, restore, merge (-Oz) | 109 900 |
-| crt and runtime glue | 6 678 |
+| bu cold path: CLI, key file, walk, pipeline, chains, manifest, restore, merge (-Oz) | 111 836 |
+| crt, runtime glue and the help text | 7 404 |
 
 The remaining ~21 KB of the file are ELF headers, dynamic-linking tables
 (`.dynsym`, `.dynstr`, relocations for the ~90 glibc symbols used) and
@@ -768,7 +778,9 @@ and the overlapped batches in restore, eight readers in create) added 4.5 KB.
 Chain files added 34.5 KB of cold code: finding segments from the end and
 past an interrupted append, the stream reader and stream restore, record
 headers, locking and truncate-on-failure, in-place merge with spans,
-unencrypted segments, and the longer help text.
+unencrypted segments, and the longer help text. `create -C`, `--exclude`,
+`-x`, exit status 3 and the build identity in `--version` added 2.9 KB, of
+which 0.7 KB is help text.
 
 The size rule is "small by default, speed wins on hot paths", so the budget
 went to the SIMD variants: the AVX-512 BLAKE3 kernel alone is 21 KB, and
@@ -852,8 +864,8 @@ backup help, since `K` itself is what they can recover.
 
 - Hard links (restored as separate files), extended attributes, ACLs,
   device files, FIFOs and sockets (skipped with a warning), file flags.
-- Exclude patterns and a one-file-system switch; back up what you name (the
-  walk descends into mounted filesystems).
+- Include patterns, pattern files and regular expressions: `--exclude`
+  takes globs, and what is not excluded is what you named.
 - More than one snapshot per segment, and pruning other than by merging.
 - Merging from a pipe: what to keep is known only at the end of the chain.
   Save the stream to a file first.

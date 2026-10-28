@@ -47,11 +47,23 @@
 // modified within the same timestamp tick right after it was read): a cache
 // entry is only trusted when its ctime is at least a second older than the
 // moment the base backup started. Such files are simply read once more.
+//
+// WHAT IS WALKED. Each PATH is stored as given, less a leading "/" or "./";
+// -C DIR makes create fchdir into DIR for the walk and the reads (tar's -C),
+// so `-C /srv/data .` stores app.db instead of srv/data/app.db. Everything
+// else named on the command line (CHAIN, --base, --index-out, the key and
+// passphrase files) is opened before the fchdir or after the fchdir back, so
+// it stays relative to where bu was started. --exclude patterns
+// (cmd/exclude.hpp) are tested before an entry is even stat'ed, and an
+// excluded directory is not opened. -x keeps the walk on each PATH's
+// filesystem: a mount point is stored as an empty directory (so a restore
+// recreates the place to mount on) and not descended into, as rsync -x does.
 
 #include "chunk/chunker.hpp"
 #include "cmd/args.hpp"
 #include "cmd/chain.hpp"
 #include "cmd/commands.hpp"
+#include "cmd/exclude.hpp"
 #include "cmd/passphrase.hpp"
 #include "core/sort.hpp"
 #include "core/thread.hpp"
@@ -92,6 +104,9 @@ struct Walk {
     String fsPaths;
     HashIndex seen;              // stored paths already added (overlapping roots)
     const IndexData* base = nullptr;
+    const Excludes* excludes = nullptr;   // null: none given
+    bool oneFs = false;          // -x: stay on rootDev
+    u64 rootDev = 0;             // st_dev of the PATH being walked
     bool useCache = false;
     bool skipOut = false;        // stdout is a regular file at (skipDev, skipIno)
     u64 skipDev = 0, skipIno = 0;
@@ -139,6 +154,7 @@ void walkDir(Walk& w, int fd, StringView stored, StringView fsPath) {
         childFs.assign(fsPath);
         if (!fsPath.endsWith("/"_s)) childFs.append('/');
         childFs.append(StringView(n));
+        if (w.excludes && excludeMatch(*w.excludes, childStored.c_str(), childStored.count)) continue;
         struct stat st;
         if (fstatat(fd, n, &st, AT_SYMLINK_NOFOLLOW) != 0) { warn(w, childFs, StringView(strerror(errno))); continue; }
         addEntry(w, fd, n, childStored, childFs, st);
@@ -151,6 +167,8 @@ void addEntry(Walk& w, int dirfd, const char* name, StringView stored, StringVie
     else if (S_ISDIR(st.st_mode)) type = kEntryDir;
     else if (S_ISLNK(st.st_mode)) type = kEntrySymlink;
     else { warn(w, fsPath, "skipping special file (device, fifo or socket)"_s); return; }
+    // -x: a file bind-mounted from elsewhere is on another filesystem too.
+    if (w.oneFs && type != kEntryDir && u64(st.st_dev) != w.rootDev) return;
     if (w.skipOut && u64(st.st_dev) == w.skipDev && u64(st.st_ino) == w.skipIno) return;   // our own output
 
     if (!stored.empty()) {
@@ -217,6 +235,7 @@ void addEntry(Walk& w, int dirfd, const char* name, StringView stored, StringVie
             w.bytesToRead += e.size;
         }
     } else if (type == kEntryDir) {
+        if (w.oneFs && u64(st.st_dev) != w.rootDev) return;     // a mount point: stored, not entered
         const int fd = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0) { warn(w, fsPath, StringView(strerror(errno))); return; }
         walkDir(w, fd, stored, fsPath);
@@ -729,6 +748,12 @@ void onFatalSignal(int sig) {
 
 constexpr int kFatalSignals[] = {SIGINT, SIGTERM, SIGHUP};
 
+// A descriptor closed on every return path.
+struct FdGuard {
+    int fd = -1;
+    ~FdGuard() { if (fd >= 0) close(fd); }
+};
+
 // The chain being appended to, or the pipe being streamed to.
 struct Target {
     const char* name = nullptr;   // for messages
@@ -818,11 +843,26 @@ int openTarget(const char* chainArg, Target& t) {
 
 int cmdCreate(int argc, char** argv, int first) {
     Args a;
-    if (!argsParse("create", argc, argv, first, kArgKey | kArgBase | kArgIndexOut | kArgJobs | kArgNoCache | kArgVerbose, a))
+    if (!argsParse("create", argc, argv, first, kArgKey | kArgBase | kArgIndexOut | kArgJobs | kArgNoCache | kArgVerbose
+                                                    | kArgDir | kArgExclude | kArgOneFs, a))
         return kExitUsage;
     if (!a.key && !a.noKey) return usage("create", "give --key KEYFILE (encrypted) or --no-key (unencrypted)"_s);
     if (a.positional.count < 2) return usage("create", "name the CHAIN and at least one PATH to back up"_s);
     const char* chainArg = a.positional[0];
+    String err;
+    Excludes excludes;
+    for (const char* pat : a.excludes)
+        if (!excludeAdd(excludes, StringView(pat), err)) return usage("create", err.view());
+    // -C DIR: opened now, entered only for the walk and the reads. A DIR that
+    // is not there fails here, before the chain file is created or a
+    // passphrase asked for.
+    FdGuard walkDirFd, startDirFd;
+    if (a.dir) {
+        walkDirFd.fd = open(a.dir, O_PATH | O_DIRECTORY | O_CLOEXEC);
+        if (walkDirFd.fd < 0) { fprintf(stderr, "bu create: -C %s: %s\n", a.dir, strerror(errno)); return kExitRuntime; }
+        startDirFd.fd = open(".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+        if (startDirFd.fd < 0) { fprintf(stderr, "bu create: the current directory: %s\n", strerror(errno)); return kExitRuntime; }
+    }
     // A pipe reader that goes away (aws s3 cp failing) must become a write
     // error we report — and a run that does NOT write the index — not a
     // silent death by SIGPIPE.
@@ -830,7 +870,6 @@ int cmdCreate(int argc, char** argv, int first) {
 
     Target t;
     if (const int rc = openTarget(chainArg, t)) return rc;
-    String err;
     Chain chain;
     bool chainPlain = a.noKey;
     if (t.seek && t.size) {
@@ -908,6 +947,9 @@ int cmdCreate(int argc, char** argv, int first) {
     Walk w;
     w.base = &base;
     w.useCache = haveBase && !a.noCache;
+    w.excludes = excludes.offs.count ? &excludes : nullptr;
+    w.oneFs = a.oneFs;
+    if (a.dir && fchdir(walkDirFd.fd) != 0) { fprintf(stderr, "bu create: -C %s: %s\n", a.dir, strerror(errno)); return kExitRuntime; }
     // A chain inside the tree it backs up must not back itself up while
     // growing: remember its inode.
     {
@@ -921,11 +963,13 @@ int cmdCreate(int argc, char** argv, int first) {
             fprintf(stderr, "bu create: '%s' contains a '..' component; cd to its parent and name it from there\n", rootArg);
             return kExitUsage;
         }
+        if (w.excludes && !stored.empty() && excludeMatch(*w.excludes, stored.c_str(), stored.count)) continue;
         struct stat st;
         if (fstatat(AT_FDCWD, rootArg, &st, AT_SYMLINK_NOFOLLOW) != 0) {
             fprintf(stderr, "bu create: %s: %s\n", rootArg, strerror(errno));
             return kExitRuntime;
         }
+        w.rootDev = u64(st.st_dev);
         // For a root, "dirfd + name" is the cwd plus the path as given.
         addEntry(w, AT_FDCWD, rootArg, stored.view(), StringView(rootArg), st);
     }
@@ -1032,6 +1076,12 @@ int cmdCreate(int argc, char** argv, int first) {
     for (u32 i = 0; i < readersStarted; ++i) readerThreads[i].join();
     chunker.join();
     for (u32 i = 0; i < started; ++i) pool[i].join();
+    // Back to where bu was started: --index-out is relative to it.
+    if (a.dir && fchdir(startDirFd.fd) != 0) {
+        String m("cannot return to the starting directory: "_s);
+        m.append(StringView(strerror(errno)));
+        return abandon(m.view());
+    }
 
     if (out.failed) {
         String m("writing the backup to "_s);
@@ -1125,7 +1175,7 @@ int cmdCreate(int argc, char** argv, int first) {
                 (unsigned long long)stats.chunks, (unsigned long long)stats.newChunks, b3, secs,
                 secs > 0 ? double(stats.rawRead) / secs / double(1 << 20) : 0.0, started);
     }
-    return (w.warnings || p.readWarnings) ? kExitRuntime : kExitOk;
+    return (w.warnings || p.readWarnings) ? kExitWarnings : kExitOk;
 }
 
 } // namespace bk

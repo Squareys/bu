@@ -73,8 +73,9 @@ configuration.
     digest across `-j` values.
 11. **CLI input is refused by name, never guessed.** Unknown, repeated,
     valueless or out-of-range options exit 2 with the option named; runtime
-    failures exit 1; success 0. `create` with warnings (unreadable files) exits
-    1 but leaves a valid chain.
+    failures exit 1; success 0. `create` with warnings (unreadable files)
+    exits 3 and leaves a valid chain. `--exclude` is the one option that may
+    be repeated.
 12. **No network code.** bu reads and writes file descriptors: files on any
     mount, and stdio. S3, SSH and the like are the caller's mount or pipe.
 13. **A chain is never left half-written by bu.** `create` holds the chain's

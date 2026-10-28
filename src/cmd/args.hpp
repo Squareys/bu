@@ -15,6 +15,10 @@ namespace bk {
 constexpr int kExitOk = 0;
 constexpr int kExitRuntime = 1;
 constexpr int kExitUsage = 2;
+// create finished but left something out or saw a file change size; its
+// output is complete and valid. Distinct from 1 so a cron job can tell
+// "look at the warnings" from "there is no backup".
+constexpr int kExitWarnings = 3;
 
 // Every option any subcommand takes. A subcommand declares which it accepts
 // with a mask; one parser means one set of refusal messages.
@@ -37,6 +41,8 @@ enum ArgFlag : u32 {
     kArgKdfTargetMs = 1u << 15, // --kdf-target-ms MS
     kArgSlot = 1u << 16,        // --slot N
     kArgNoKey = 1u << 17,       // --no-key
+    kArgExclude = 1u << 18,     // --exclude PATTERN (repeatable: the one option that may be)
+    kArgOneFs = 1u << 19,       // -x, --one-file-system
 };
 // Every command that unlocks a key file takes both passphrase sources; with
 // neither, it asks on the terminal.
@@ -63,6 +69,8 @@ struct Args {
     bool noCache = false;
     bool noKey = false;
     bool verbose = false;
+    bool oneFs = false;
+    Array<const char*> excludes;     // in the order given, never null entries
     Array<const char*> positional;   // never null entries
     u32 dashDash = kInvalidIndex;    // positional count before a "--", if one was given
 };

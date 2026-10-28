@@ -66,11 +66,21 @@ Make a full backup. bu creates the chain file.
 bu create --key ~/.bu.key /backup/data.bu ~/data
 ```
 
+bu stores each `PATH` as you name it, less a leading `/` (and `./`): the
+backup above holds `home/me/data/...`. To store paths relative to a
+directory, name it with `-C DIR` (as in `tar -C`) and back up `.`; the
+chain, `--base`, `--index-out` and the key stay relative to where you run
+bu. This backup holds `notes/...` and `app.db`:
+
+```sh
+bu create --key ~/.bu.key -C ~/data /backup/data.bu .
+```
+
 Run the same command again for each increment. It reads the chain's latest
 snapshot, stores the new chunks and reads only the changed files.
 
 ```sh
-bu create --key ~/.bu.key /backup/data.bu ~/data
+bu create --key ~/.bu.key -C ~/data /backup/data.bu .
 ```
 
 Restore the latest state. bu verifies each chunk.
@@ -79,11 +89,11 @@ Restore the latest state. bu verifies each chunk.
 bu restore --key ~/.bu.key -C /restore /backup/data.bu
 ```
 
-Restore one directory, named as `bu list` shows it (bu stores paths without
-the leading `/`). bu reads only that directory's chunks.
+Restore one directory, named as `bu list` shows it. bu reads only that
+directory's chunks.
 
 ```sh
-bu restore --key ~/.bu.key -C /restore /backup/data.bu -- home/me/data/notes
+bu restore --key ~/.bu.key -C /restore /backup/data.bu -- notes
 ```
 
 Authenticate every record of the chain.
@@ -116,8 +126,26 @@ first line):
 and name that file:
 
 ```sh
-bu create --key /root/.bu.key --passphrase-file /root/.bu-pass /backup/srv.bu /srv/data
+bu create --key /root/.bu.key --passphrase-file /root/.bu-pass -C /srv/data /backup/srv.bu .
 ```
+
+Leave things out with `--exclude PATTERN` (repeatable) and stay on one
+filesystem with `-x`:
+
+```sh
+bu create --key ~/.bu.key --exclude '*.tmp' --exclude cache --exclude /build -x \
+    -C ~/data /backup/data.bu .
+```
+
+A pattern is a glob (`*`, `?`, `[...]`, as in fnmatch(3)). A pattern
+without a `/` matches the last name at any depth (`cache` leaves out every
+directory or file named cache); a pattern with a `/` matches the whole
+stored path from the top (`/build` and `build/out` match only there, and
+`*` crosses `/` in them, as in tar). A leading `/` or `./` and a trailing
+`/` are ignored for the match, since stored paths have none. bu does not
+descend into an excluded directory. `-x` (`--one-file-system`) stores a
+mount point below a `PATH` as an empty directory and does not cross into
+it.
 
 Or hand it over on a file descriptor, here from a password manager:
 
@@ -247,6 +275,32 @@ full segment of the latest state, without reading your data again, and
 bu merge --key ~/.bu.key -o /backup/data-2026-11.bu /backup/data-2026-10.bu
 ```
 
+**What merge reclaims.** A merged chain holds the latest snapshot and
+exactly the chunks it references. What merge drops is everything the latest
+snapshot no longer references: chunks of deleted files and the old versions
+of rewritten data, plus the older snapshots' manifests and tables. So the
+savings follow the churn. A chain of one day's increments barely shrinks,
+since nearly every chunk it stored is still in use. A month of a database
+that rewrites its pages, or of files created and deleted, shrinks by about
+the stored size of what was rewritten or deleted that month. Merging never shrinks the latest
+state itself: a merged chain is about the size of a full backup of it.
+
+**Retention.** Merge is bu's retention tool: there is no `prune`. Keep one
+chain per month, start each month's chain by merging the last one, and
+delete the chains you no longer want to restore from. Each chain is
+complete on its own, so deleting an old one never breaks a newer one:
+
+```sh
+# On the 1st of the month, from cron: start this month's chain.
+prev=/backup/data-$(date -d 'last month' +%Y-%m).bu
+cur=/backup/data-$(date +%Y-%m).bu
+[ -e "$cur" ] || [ ! -e "$prev" ] || bu merge --key /root/.bu.key --passphrase-file /root/.bu-pass -o "$cur" "$prev"
+# Keep twelve months.
+rm -f "/backup/data-$(date -d '12 months ago' +%Y-%m).bu"
+```
+
+Daily `create`s then append to `$cur`.
+
 **Unencrypted chains.** `--no-key` writes a chain without encryption: no
 key file, and the reading commands need no key. Checksums catch damage,
 not tampering (see [Security](#security)).
@@ -264,7 +318,7 @@ bu create --no-key /backup/media.bu ~/media
 | `bu key passwd KEYFILE` | Change the passphrase you unlock with. |
 | `bu key remove KEYFILE [--slot N]` | Remove the slot you unlock with, or slot `N`. Refuses to remove the last usable slot. |
 | `bu key info KEYFILE` | Show the key ID and each slot's KDF costs. Prints no secret. |
-| `bu create (--key KEYFILE \| --no-key) [--base INDEX] [--index-out INDEX] [-j N] [--no-files-cache] [-v] CHAIN PATH...` | Back up `PATH...`: a full backup into a new or empty `CHAIN`, an increment appended to an existing one (store the chunks its latest snapshot lacks, skip reading files whose metadata is unchanged; `--no-files-cache` reads them anyway). `CHAIN` `-` is stdout: a file there is appended to, a pipe gets the segment streamed, with the base from `--base`. `--index-out` writes the new snapshot's index. |
+| `bu create (--key KEYFILE \| --no-key) [--base INDEX] [--index-out INDEX] [-C DIR] [--exclude PATTERN]... [-x] [-j N] [--no-files-cache] [-v] CHAIN PATH...` | Back up `PATH...`: a full backup into a new or empty `CHAIN`, an increment appended to an existing one (store the chunks its latest snapshot lacks, skip reading files whose metadata is unchanged; `--no-files-cache` reads them anyway). `CHAIN` `-` is stdout: a file there is appended to, a pipe gets the segment streamed, with the base from `--base`. `--index-out` writes the new snapshot's index. Each `PATH` is stored as given less a leading `/`; `-C DIR` reads the `PATH`s from `DIR` (`-C DIR .` stores paths relative to `DIR`). `--exclude` leaves out matching paths (see [Quick start](#quick-start)), `-x` (`--one-file-system`) does not cross into other filesystems. |
 | `bu restore [--key KEYFILE] [--index INDEX] [-C DIR] [-j N] [-v] CHAIN... [-- PATH...]` | Restore the latest snapshot into `DIR` (default: the current directory), or only the `PATH`s after `--`. A chain on a pipe (`-`) needs `--index`. |
 | `bu merge [--key KEYFILE] [-o OUT] [-j N] [-v] CHAIN...` | Write one full segment of the latest snapshot, with the chunks it references and no others, to `OUT` (default: stdout). `OUT` may be the chain itself. |
 | `bu check [--key KEYFILE] [-j N] [-v] CHAIN...` | Authenticate every record and verify that every snapshot is complete. |
@@ -302,8 +356,12 @@ slot's memory free. For a small server, add a slot on the server, or pass
 | Code | Meaning |
 |---|---|
 | 0 | Success. |
-| 1 | Failure, or `create` finished with warnings: it left out unreadable files, or a file changed size while bu read it. The chain is still valid. |
+| 1 | Failure. `create` leaves the chain as it was. |
 | 2 | Usage error. |
+| 3 | `create` finished with warnings: it left out unreadable files, or a file changed size while bu read it. The new backup is complete and the chain valid; the warnings name what it lacks. |
+
+From cron, treat 3 as "look at the warnings" and 1 or 2 as "no new
+backup".
 
 ## Performance
 
@@ -390,13 +448,25 @@ Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ## Limitations
 
-bu does not support (see
+**What bu keeps.** Regular files (contents; sparse regions of zeros come
+back as holes), directories and symbolic links (the target as stored, never
+followed); each entry's permission bits, including set-uid, set-gid and
+sticky; its modification time to the nanosecond; and its numeric owner and
+group. Restore sets owners, and the set-uid and set-gid bits of files, only
+when run as root; otherwise everything belongs to whoever restores it.
+
+**What bu does not keep** (see
 [docs/design.md §12](docs/design.md#12-deliberate-omissions)):
 
-- Hard links (restored as separate files), extended attributes, ACLs and file
-  flags. bu skips device files, FIFOs and sockets with a warning.
-- Exclude patterns and a one-file-system switch: back up what you name; the
-  walk descends into mounted filesystems.
+- Hard links: each name is restored as a separate file (dedupe stores the
+  data once in the backup, but not on restore).
+- Extended attributes, POSIX ACLs, SELinux labels, file capabilities and
+  file flags (`chattr`).
+- Device files, FIFOs and sockets: skipped with a warning (exit status 3).
+- Access and change times: a restored file's access time is its
+  modification time, and the kernel sets the change time.
+- Owner and group names: bu stores the numeric IDs, so restoring on another
+  machine maps them to whoever has those IDs there.
 - More than one snapshot per segment, and pruning other than by merging.
 - Merging a chain read from a pipe: save it to a file first.
 - Making a live database consistent: give bu a consistent copy.

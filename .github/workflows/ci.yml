@@ -22,6 +22,10 @@
 #     own pseudo-terminal, so they work without a TTY on the runner.
 #   - The runner user is not root, so 07-unreadable runs (it skips as root)
 #     and 10-restore-target checks the non-root set-uid stripping.
+#   - 22-one-file-system needs a mount to cross. It mounts a tmpfs in a user
+#     and mount namespace where the kernel allows that; Ubuntu 24.04 runners
+#     restrict unprivileged user namespaces (AppArmor), so there it uses the
+#     /dev/shm mount below /dev instead.
 #   - 13-create-no-hang needs taskset and 4 CPUs; the standard runner has 4.
 #     It is a regression test for a hang, so it runs in e2e and under both
 #     sanitizers, not in the smoke tests (40 creates). Each create in it has

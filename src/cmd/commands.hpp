@@ -1,6 +1,7 @@
 // commands.hpp — one entry point per subcommand; main.cpp dispatches.
 // Each takes the full argv and the index of its first own argument, parses
-// with argsParse and returns the process exit status (0 ok, 1 runtime, 2 usage).
+// with argsParse and returns the process exit status (0 ok, 1 runtime, 2 usage,
+// 3 create finished with warnings).
 #pragma once
 
 namespace bk {

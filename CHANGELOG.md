@@ -7,6 +7,34 @@ own version number (docs/format.md); a release that changes it says so.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
+Chain and key file formats unchanged (chain format version 2, key file
+format version 2): 0.1.0 chains and key files work as they are.
+
+### Added
+- `create -C DIR` reads the PATHs from DIR, as `tar -C` does, so
+  `bu create -C /srv/data CHAIN .` stores `app.db` and `memory/...`
+  instead of `srv/data/app.db`. CHAIN, `--base`, `--index-out` and the key
+  and passphrase files stay relative to the directory bu was started in.
+- `create --exclude PATTERN`, repeatable: a glob (fnmatch) without a `/`
+  matches the last name at any depth, one with a `/` the whole stored path.
+  An excluded directory is not descended into.
+- `create -x` / `--one-file-system`: a mount point below a PATH is stored
+  as an empty directory and not crossed into.
+- `bu --version` names the commit and the build type, e.g.
+  `bu 0.2.0 (abc1234, Release)`; `-dirty` when the tree had uncommitted
+  changes, `unknown` when not built from a git checkout.
+- README: how PATHs become stored paths, what bu preserves and what it does
+  not, and what `merge` reclaims, with a monthly retention pattern.
+
+### Changed
+- **`create` exits 3, not 1, when it finished with warnings** (unreadable
+  files left out, a file that changed size while read). The backup is still
+  complete and valid. 1 now always means failure and 2 a usage error.
+  Scripts that treated 1 as "backup made with warnings" must check for 3.
+- The exit codes are listed in `bu help`.
+
 ## [0.1.0] - 2026-10-27
 
 Initial release. Chain file format version 2, key file format version 2.
@@ -60,5 +88,6 @@ Initial release. Chain file format version 2, key file format version 2.
   ASan/UBSan and TSan runs, benchmarks (`scripts/bench.sh`,
   `scripts/bench_io.sh`).
 
-[Unreleased]: https://github.com/Squareys/bu/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Squareys/bu/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Squareys/bu/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Squareys/bu/releases/tag/v0.1.0

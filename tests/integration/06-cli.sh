@@ -43,7 +43,18 @@ usage "not both" key init --kdf-time 2 --kdf-target-ms 500 k2
 usage "not both" list --key key --passphrase-file pass --passphrase-fd 0 c.bu
 usage "0 to 7" key remove --slot 8 key
 usage "unknown option '--slot'" key add --slot 1 key
-"$BU" help | grep -q "bu create" || fail "help text"
+usage "given twice" create "${K[@]}" -x --one-file-system c.bu src
+usage "names something" create "${K[@]}" --exclude ./ c.bu src
+usage "unknown option '--exclude'" restore "${K[@]}" --exclude x -C out c.bu
+usage "unknown option '-x'" merge "${K[@]}" -x -o m.bu c.bu
+# Captured first: grep -q stops reading at the first match, and bu writing
+# the rest of the help into a closed pipe dies of SIGPIPE (pipefail).
+help=$("$BU" help)
+echo "$help" | grep -q "bu create" || fail "help text"
+echo "$help" | grep -q "3 create finished with" || fail "help text does not list exit status 3"
+# --version names the commit (or "unknown" outside a git checkout) and the build type.
+"$BU" --version | grep -Eqx 'bu [0-9]+\.[0-9]+\.[0-9]+ \(([0-9a-f]{7,}(-dirty)?|unknown), [A-Za-z]+\)' \
+    || fail "bad --version: $("$BU" --version)"
 
 # A key others can read is used, with a warning.
 cp key loose && chmod 644 loose

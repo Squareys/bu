@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 07-unreadable.sh — a file create cannot read is left out with a warning and
-# exit status 1, and everything else is still backed up and restorable (the
+# exit status 3 (finished with warnings; 1 is kept for failures, after which
+# there is no new backup), and everything else is still backed up and restorable (the
 # segment is complete and the chain valid). Skipped as root, who can read anything.
 source "$(dirname "$0")/lib.sh"
 [ "$(id -u)" != 0 ] || { note "SKIP: running as root"; exit 0; }
@@ -11,7 +12,7 @@ prand secret 300000 > src/secret.bin
 chmod 000 src/secret.bin
 rc=0
 "$BU" create "${K[@]}" c.bu src 2> err || rc=$?
-[ "$rc" = 1 ] || fail "expected exit 1 for a partial backup, got $rc"
+[ "$rc" = 3 ] || fail "expected exit 3 for a backup with warnings, got $rc"
 grep -q "secret.bin" err || fail "no warning naming the unreadable file: $(cat err)"
 "$BU" check "${K[@]}" c.bu
 rm -rf out && "$BU" restore "${K[@]}" -C out c.bu

@@ -2,7 +2,7 @@
 # as one small native binary. Linux x86-64, clang, no STL in our own code (see
 # CONTRIBUTING.md), no exceptions, no RTTI.
 cmake_minimum_required(VERSION 3.20)
-project(bu VERSION 0.1.0 LANGUAGES C CXX)
+project(bu VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -158,6 +158,48 @@ target_include_directories(bk_blake2b PRIVATE third_party/libsodium/include/sodi
 target_compile_definitions(bk_blake2b PRIVATE CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1 _GNU_SOURCE)
 target_compile_options(bk_blake2b PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
 
+# ------------------------------------------------------------- identity ----
+# `bu --version` names the commit and the build type next to the version, so
+# a binary found on a server says what it was built from. The commit is read
+# at configure time (scripts/build.sh configures on every run): the short
+# hash, with -dirty when tracked files had uncommitted changes, or "unknown"
+# outside a git checkout (a release tarball). The checkout must be this
+# source tree itself, not a repository that happens to contain an unpacked
+# tarball. Commits and checkouts made between two plain `cmake --build` runs
+# re-run the configure step through CONFIGURE_DEPENDS on HEAD, its reflog
+# and the index.
+set(BU_COMMIT unknown)
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} rev-parse --show-toplevel
+        OUTPUT_VARIABLE BK_GIT_TOP RESULT_VARIABLE BK_GIT_RC OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    file(REAL_PATH "${CMAKE_SOURCE_DIR}" BK_SRC_REAL)
+    if(BK_GIT_RC EQUAL 0)
+        file(REAL_PATH "${BK_GIT_TOP}" BK_GIT_TOP)
+    endif()
+    if(BK_GIT_RC EQUAL 0 AND BK_GIT_TOP STREQUAL BK_SRC_REAL)
+        execute_process(COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} rev-parse --short=7 HEAD
+            OUTPUT_VARIABLE BK_GIT_HASH RESULT_VARIABLE BK_GIT_RC OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(BK_GIT_RC EQUAL 0 AND BK_GIT_HASH)
+            set(BU_COMMIT ${BK_GIT_HASH})
+            execute_process(COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} status --porcelain --untracked-files=no
+                OUTPUT_VARIABLE BK_GIT_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(BK_GIT_DIRTY)
+                string(APPEND BU_COMMIT -dirty)
+            endif()
+            foreach(BK_GIT_FILE HEAD index logs/HEAD)
+                execute_process(COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_SOURCE_DIR} rev-parse --path-format=absolute --git-path ${BK_GIT_FILE}
+                    OUTPUT_VARIABLE BK_GIT_PATH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                if(BK_GIT_PATH AND EXISTS "${BK_GIT_PATH}")
+                    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${BK_GIT_PATH}")
+                endif()
+            endforeach()
+        endif()
+    endif()
+endif()
+set(BK_IDENTITY BU_VERSION="${PROJECT_VERSION}" BU_COMMIT="${BU_COMMIT}" BU_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+message(STATUS "bu ${PROJECT_VERSION} (${BU_COMMIT}, ${CMAKE_BUILD_TYPE})")
+
 # ------------------------------------------------------------------- bu ----
 
 # Hot: per-byte or per-chunk work. These keep -O2 (the vendored code -O3).
@@ -180,6 +222,7 @@ set(BK_COLD_SOURCES
     src/format/snapshot.cpp
     src/format/keyfile.cpp
     src/cmd/args.cpp
+    src/cmd/exclude.cpp
     src/cmd/passphrase.cpp
     src/cmd/key.cpp
     src/cmd/chain.cpp
@@ -211,7 +254,7 @@ add_executable(bu src/main.cpp ${BK_OBJECTS})
 target_include_directories(bu PRIVATE src)
 target_compile_options(bu PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
 target_link_options(bu PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
-target_compile_definitions(bu PRIVATE BU_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(bu PRIVATE ${BK_IDENTITY})
 if(NOT BK_SANITIZE)
     # Strip at link time: the shipped artifact is the stripped one, and the
     # size budget is measured on exactly that file.
@@ -224,7 +267,7 @@ if(NOT BK_SANITIZE)
     target_include_directories(bu_symbols PRIVATE src)
     target_compile_options(bu_symbols PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_COLD_OPT} ${BK_LTO_FLAGS})
     target_link_options(bu_symbols PRIVATE ${BK_LINK_FLAGS} ${BK_NOSTDLIBXX})
-    target_compile_definitions(bu_symbols PRIVATE BU_VERSION="${PROJECT_VERSION}")
+    target_compile_definitions(bu_symbols PRIVATE ${BK_IDENTITY})
     set_target_properties(bu_symbols PROPERTIES EXCLUDE_FROM_ALL ON)
 endif()
 
@@ -238,6 +281,7 @@ add_executable(bu_tests
     tests/test_chunker.cpp
     tests/test_format.cpp
     tests/test_keyfile.cpp
+    tests/test_exclude.cpp
     ${BK_OBJECTS})
 target_include_directories(bu_tests PRIVATE src tests)
 target_compile_options(bu_tests PRIVATE ${BK_CXX_FLAGS} ${BK_COMMON_FLAGS} ${BK_OPT_FLAGS} ${BK_LTO_FLAGS})

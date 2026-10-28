@@ -8,6 +8,10 @@
 #
 # The tag must match the version in CMakeLists.txt (`bu --version` prints
 # that one), so a release cannot carry a binary that names another version.
+# `bu --version` also names the commit, read by CMake from the checkout: the
+# default shallow checkout (fetch-depth 1) has the tagged commit as HEAD,
+# which is all `git rev-parse` needs, and the build directory lives outside
+# the tree, so the tree stays clean and the binary does not say -dirty.
 # The release notes are the tag's section of CHANGELOG.md.
 name: Release
 
@@ -60,7 +64,8 @@ jobs:
           mkdir dist
           cp "$build_dir/bu" "dist/$name"
           strip "dist/$name"
-          [ "$("dist/$name" --version)" = "bu $VERSION" ] || { echo "::error::binary reports '$("dist/$name" --version)'"; exit 1; }
+          want="bu $VERSION ($(git rev-parse --short=7 HEAD), Release)"
+          [ "$("dist/$name" --version)" = "$want" ] || { echo "::error::binary reports '$("dist/$name" --version)', expected '$want'"; exit 1; }
           (cd dist && sha256sum "$name" > "$name.sha256")
           cp THIRD_PARTY_NOTICES dist/
           ls -l dist

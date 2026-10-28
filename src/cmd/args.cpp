@@ -30,6 +30,9 @@ const Spec kSpecs[] = {
     {"--kdf-time"_s, kArgKdfTime, true},
     {"--kdf-target-ms"_s, kArgKdfTargetMs, true},
     {"--slot"_s, kArgSlot, true},
+    {"--exclude"_s, kArgExclude, true},
+    {"-x"_s, kArgOneFs, false},
+    {"--one-file-system"_s, kArgOneFs, false},
 };
 
 // A whole number in [lo, hi], or a usage error naming the option and the range.
@@ -64,7 +67,7 @@ bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, A
         const Spec* spec = nullptr;
         for (const Spec& s : kSpecs) if (s.name == a) { spec = &s; break; }
         if (!spec || !(allowed & spec->flag)) return usageError(cmd, "unknown option '"_s, a, "'"_s);
-        if (seen & spec->flag) return usageError(cmd, "option '"_s, a, "' given twice"_s);
+        if ((seen & spec->flag) && spec->flag != kArgExclude) return usageError(cmd, "option '"_s, a, "' given twice"_s);
         seen |= spec->flag;
         const char* value = nullptr;
         if (spec->takesValue) {
@@ -82,6 +85,8 @@ bool argsParse(const char* cmd, int argc, char** argv, int first, u32 allowed, A
         case kArgOut: out.out = value; break;
         case kArgNoCache: out.noCache = true; break;
         case kArgVerbose: out.verbose = true; break;
+        case kArgOneFs: out.oneFs = true; break;
+        case kArgExclude: out.excludes.push(value); break;
         case kArgPassFile: out.passFile = value; break;
         case kArgNewPassFile: out.newPassFile = value; break;
         case kArgPassFd:

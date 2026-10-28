@@ -3,8 +3,8 @@
 // bu works on chain files through file descriptors and never opens a network
 // connection: a chain lives on a local disk, a network mount (NFS, SMB,
 // sshfs, rclone) or goes through a pipe (ssh, `aws s3 cp -`), and bu does
-// not care which. Exit status: 0 ok, 1 runtime failure (or warnings during
-// create — see the help text), 2 usage error.
+// not care which. Exit status: 0 ok, 1 runtime failure, 2 usage error, 3
+// create finished with warnings (see the help text).
 
 #include "cmd/args.hpp"
 #include "cmd/commands.hpp"
@@ -33,7 +33,8 @@ const char kHelp[] =
 "      calibrated so one unlock takes about that long here).\n"
 "\n"
 "  bu create (--key KEYFILE | --no-key) [--base INDEX] [--index-out INDEX]\n"
-"            [-j N] [--no-files-cache] [-v] CHAIN PATH...\n"
+"            [-C DIR] [--exclude PATTERN]... [-x] [-j N] [--no-files-cache] [-v]\n"
+"            CHAIN PATH...\n"
 "      Back up PATH... into CHAIN. A new or empty file gets a full backup; a\n"
 "      chain gets an increment appended (its latest snapshot is the base:\n"
 "      only new chunks are stored, and files whose metadata is unchanged are\n"
@@ -41,6 +42,14 @@ const char kHelp[] =
 "      to a pipe, with the base from --base INDEX. --index-out writes the new\n"
 "      snapshot's index (for the next --base). --no-key: unencrypted, with\n"
 "      checksums against damage but no protection against tampering.\n"
+"      Each PATH is stored as given, less a leading / or ./ (/srv/data is\n"
+"      srv/data); -C DIR reads the PATHs from DIR, so -C /srv/data . stores\n"
+"      app.db, not srv/data/app.db. CHAIN, --base, --index-out and the key\n"
+"      stay relative to where bu was started. --exclude PATTERN (repeatable)\n"
+"      leaves out what matches, and a directory's contents with it: a glob\n"
+"      with a / matches the whole stored path, one without matches the last\n"
+"      name at any depth. -x, --one-file-system: do not descend into a\n"
+"      directory on another filesystem than its PATH (it is stored empty).\n"
 "\n"
 "  bu restore [--key KEYFILE] [--index INDEX] [-C DIR] [-j N] [-v] CHAIN... [-- PATH...]\n"
 "      Restore the latest snapshot into DIR (default: the current directory),\n"
@@ -73,12 +82,14 @@ const char kHelp[] =
 "--new-passphrase-fd N (key init: from --passphrase-file or --passphrase-fd).\n"
 "\n"
 "-j N sets the worker threads (default: online CPUs; restore: at most 8;\n"
-"create: the CPUs less three quarters of its readers). Exit status: 0 ok;\n"
-"1 failure, or create finished with warnings (unreadable files were left\n"
-"out; the backup is still valid); 2 usage error.\n"
+"create: the CPUs less three quarters of its readers).\n"
+"\n"
+"Exit status: 0 ok; 1 failure; 2 usage error; 3 create finished with\n"
+"warnings (unreadable files were left out, or a file changed size while it\n"
+"was read): the backup is complete and valid, the warnings say what it lacks.\n"
 "\n"
 "Example (daily, from cron):\n"
-"  bu create --key k --passphrase-file ~/.bu-pass /mnt/backup/data.bu ~/data\n";
+"  bu create --key k --passphrase-file ~/.bu-pass -C ~/data /mnt/backup/data.bu .\n";
 
 } // namespace
 
@@ -93,7 +104,7 @@ int main(int argc, char** argv) {
     if (cmd == "list"_s) return cmdList(argc, argv, 2);
     if (cmd == "key"_s) return cmdKey(argc, argv, 2);
     if (cmd == "help"_s || cmd == "--help"_s || cmd == "-h"_s) { fputs(kHelp, stdout); return kExitOk; }
-    if (cmd == "version"_s || cmd == "--version"_s) { puts("bu " BU_VERSION); return kExitOk; }
+    if (cmd == "version"_s || cmd == "--version"_s) { puts("bu " BU_VERSION " (" BU_COMMIT ", " BU_BUILD_TYPE ")"); return kExitOk; }
     fprintf(stderr, "bu: unknown command '%s' (run `bu help`)\n", argv[1]);
     return kExitUsage;
 }
