@@ -5,21 +5,34 @@ description: Print the CPU flags bu needs at runtime and install clang, lld, CMa
 runs:
   using: composite
   steps:
-    # bu requires AES-NI, PCLMUL and AVX at runtime (BLAKE3 also uses SSE4.1,
-    # AVX2 and AVX-512 when present). GitHub-hosted x86-64 runners have them;
+    # bu requires the CPU's AES + carry-less-multiply extensions at runtime:
+    # on x86-64 AES-NI, PCLMUL and AVX (BLAKE3 also uses SSE4.1/AVX2/AVX-512
+    # when present); on aarch64 the ARMv8 Crypto Extensions, AES and PMULL
+    # (BLAKE3 uses NEON, which is baseline). GitHub-hosted runners have them;
     # if a runner does not, this step says so instead of a test failing later
-    # with a less obvious message.
+    # with a less obvious message. The feature list lives in /proc/cpuinfo
+    # under "flags" on x86-64 and "Features" on aarch64.
     - name: CPU features
       shell: bash
       run: |
-        grep -m1 '^model name' /proc/cpuinfo || true
-        echo "cores: $(nproc)"
-        flags=" $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2) "
+        arch="$(uname -m)"
+        echo "arch: $arch, cores: $(nproc)"
+        case "$arch" in
+            x86_64)
+                grep -m1 '^model name' /proc/cpuinfo || true
+                field=flags; show="aes pclmulqdq avx sse4_1 avx2 avx512f"; need="aes pclmulqdq avx" ;;
+            aarch64|arm64)
+                show="aes pmull asimd"; need="aes pmull" ;;
+            *)
+                echo "::error::bu supports x86_64 and aarch64; this runner is $arch"; exit 1 ;;
+        esac
+        field="${field:-Features}"
+        flags=" $(grep -m1 "^${field}" /proc/cpuinfo | cut -d: -f2) "
         missing=""
-        for f in aes pclmulqdq avx sse4_1 avx2 avx512f; do
+        for f in $show; do
             if [[ "$flags" == *" $f "* ]]; then echo "  $f: yes"; else echo "  $f: no"; fi
         done
-        for f in aes pclmulqdq avx; do
+        for f in $need; do
             [[ "$flags" == *" $f "* ]] || missing="$missing $f"
         done
         if [ -n "$missing" ]; then

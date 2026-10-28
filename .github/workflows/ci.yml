@@ -47,11 +47,19 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job runs on both architectures bu supports: the x86-64 runner and the
+# GitHub-hosted arm64 runner (ubuntu-24.04-arm). The scripts are identical on
+# both; the toolchain setup and the build select the right SIMD sources per
+# architecture.
 jobs:
   build:
-    name: Build and smoke tests
-    runs-on: ubuntu-24.04
+    name: Build and smoke tests (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
@@ -63,9 +71,13 @@ jobs:
         run: scripts/size_report.sh
 
   e2e:
-    name: End-to-end tests
-    runs-on: ubuntu-24.04
+    name: End-to-end tests (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
@@ -73,9 +85,13 @@ jobs:
         run: scripts/test.sh
 
   asan:
-    name: ASan + UBSan
-    runs-on: ubuntu-24.04
+    name: ASan + UBSan (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
@@ -88,9 +104,13 @@ jobs:
         run: scripts/test.sh --asan
 
   tsan:
-    name: TSan
-    runs-on: ubuntu-24.04
+    name: TSan (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup

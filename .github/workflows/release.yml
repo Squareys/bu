@@ -1,18 +1,26 @@
-# Release: on a pushed tag vX.Y.Z, build the Release binary on the same
-# runner and toolchain as CI (.github/actions/setup), run the smoke tests
-# against it, and publish a GitHub release with
+# Release: on a pushed tag vX.Y.Z, build the Release binary for each supported
+# architecture on its own runner and the same toolchain as CI
+# (.github/actions/setup), run the smoke tests against it, then publish one
+# GitHub release holding
 #
-#   bu-X.Y.Z-linux-x86_64          the stripped binary
+#   bu-X.Y.Z-linux-x86_64          the stripped x86-64 binary
 #   bu-X.Y.Z-linux-x86_64.sha256   its checksum, in `sha256sum -c` format
-#   THIRD_PARTY_NOTICES            licences of the vendored code in the binary
+#   bu-X.Y.Z-linux-aarch64         the stripped aarch64 binary
+#   bu-X.Y.Z-linux-aarch64.sha256  its checksum
+#   THIRD_PARTY_NOTICES            licences of the vendored code in the binaries
 #
-# The tag must match the version in CMakeLists.txt (`bu --version` prints
-# that one), so a release cannot carry a binary that names another version.
-# `bu --version` also names the commit, read by CMake from the checkout: the
-# default shallow checkout (fetch-depth 1) has the tagged commit as HEAD,
-# which is all `git rev-parse` needs, and the build directory lives outside
-# the tree, so the tree stays clean and the binary does not say -dirty.
-# The release notes are the tag's section of CHANGELOG.md.
+# The tag must match the version in CMakeLists.txt (`bu --version` prints that
+# one), so a release cannot carry a binary that names another version; each
+# per-architecture build checks its own binary. `bu --version` also names the
+# commit, read by CMake from the checkout: the default shallow checkout
+# (fetch-depth 1) has the tagged commit as HEAD, which is all `git rev-parse`
+# needs, and the build directory lives outside the tree, so the tree stays
+# clean and the binary does not say -dirty. The release notes are the tag's
+# section of CHANGELOG.md.
+#
+# The release is published by a single job that NEEDS every per-architecture
+# build, so a release is never published with only some architectures built:
+# if either build or its smoke tests fail, nothing is published.
 name: Release
 
 on:
@@ -28,10 +36,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish
-    runs-on: ubuntu-24.04
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
@@ -58,18 +72,63 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
           build_dir="$(scripts/build.sh Release --print-build-dir)"
-          name="bu-${VERSION}-linux-x86_64"
+          name="bu-${VERSION}-linux-${ARCH}"
           mkdir dist
           cp "$build_dir/bu" "dist/$name"
           strip "dist/$name"
           want="bu $VERSION ($(git rev-parse --short=7 HEAD), Release)"
           [ "$("dist/$name" --version)" = "$want" ] || { echo "::error::binary reports '$("dist/$name" --version)', expected '$want'"; exit 1; }
           (cd dist && sha256sum "$name" > "$name.sha256")
-          cp THIRD_PARTY_NOTICES dist/
           ls -l dist
           cat "dist/$name.sha256"
+
+      - name: Upload the built artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bu-${{ matrix.arch }}
+          path: |
+            dist/bu-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}
+            dist/bu-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Version from the tag
+        id: version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cmake_version="$(sed -n 's/^project(bu VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          if [ "$version" != "$cmake_version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match CMakeLists.txt version $cmake_version"
+              exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download the built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble the release
+        shell: bash
+        run: |
+          mkdir dist
+          # Each build job uploaded one binary and its .sha256; collect both,
+          # and the notices once.
+          cp artifacts/bu-x86_64/* artifacts/bu-aarch64/* dist/
+          cp THIRD_PARTY_NOTICES dist/
+          ls -l dist
+          (cd dist && sha256sum -c ./*.sha256)
 
       - name: Release notes from CHANGELOG.md
         shell: bash
@@ -96,5 +155,7 @@ jobs:
           files: |
             dist/bu-${{ steps.version.outputs.version }}-linux-x86_64
             dist/bu-${{ steps.version.outputs.version }}-linux-x86_64.sha256
+            dist/bu-${{ steps.version.outputs.version }}-linux-aarch64
+            dist/bu-${{ steps.version.outputs.version }}-linux-aarch64.sha256
             dist/THIRD_PARTY_NOTICES
           fail_on_unmatched_files: true
