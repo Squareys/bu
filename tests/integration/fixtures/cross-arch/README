@@ -1,0 +1,39 @@
+cross-arch format fixture
+=========================
+
+A chain written by one architecture's build of bu must restore on another's.
+This fixture is the "written elsewhere" half: committed data that the build
+under test restores and checks. See tests/integration/23-cross-arch-format.sh.
+
+Files:
+  chain.bu   an unencrypted (--no-key) chain of one segment, holding the tree
+             described by MANIFEST. Written by an x86_64 (little-endian) build
+             of bu 0.2.x.
+  MANIFEST   the tree the chain holds, one line per entry:
+             "<type> <mode> <size> <mtime@> <symlink-target> <path> <hash16>",
+             captured when the chain was written. The test restores chain.bu
+             and compares the restored tree against this, byte for byte.
+
+The chain is unencrypted on purpose: the test must run with no key material in
+the repository, and the unencrypted format exercises everything a reader
+decodes (header, trailer, the segment walk, the manifest's varints and delta
+program, the chunk table, the content-defined chunk boundaries and the BLAKE3
+chunk IDs). The AES-256-GCM layer is architecture-independent by construction
+and is checked against known-answer vectors on every architecture by
+tests/test_crypto.cpp.
+
+Regenerating (only if the on-disk format changes — then bump the format
+version and refresh this fixture from an x86_64 build):
+
+  mkdir -p src src/sub
+  printf 'hello cross-arch\n' > src/small.txt
+  for i in $(seq 1 4000); do \
+    printf 'line %05d the quick brown fox jumps over the lazy dog\n' "$i"; \
+  done > src/text.log
+  openssl enc -aes-128-ctr -pass pass:seed42 -nosalt -pbkdf2 -iter 1 \
+    < /dev/zero 2>/dev/null | head -c 204800 > src/rand.bin
+  printf 'nested file\n' > src/sub/nested.txt
+  ln -s small.txt src/link
+  find src -depth -exec touch -h -d '2026-01-02T03:04:05Z' {} +
+  bu create --no-key chain.bu src
+  # MANIFEST: run the manifest snippet from 23-cross-arch-format.sh over src/.
