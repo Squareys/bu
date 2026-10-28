@@ -3,7 +3,9 @@
 // No std::thread (no STL), and no pthread.h outside thread.cpp: the wrappers
 // hold the pthread objects as opaque, correctly sized storage, and thread.cpp
 // static_asserts the sizes, so the ~20 TUs that need a lock do not all parse
-// pthread.h. Linux x86-64 glibc only, like everything else here.
+// pthread.h. 64-bit Linux glibc only, like everything else here; pthread_mutex_t
+// is 40 bytes on x86-64 and 48 on aarch64, which is why Mutex::storage is sized
+// per architecture (pthread_cond_t and pthread_t are the same width on both).
 //
 // Two shapes of parallelism exist in bu and this header provides both:
 //   * the create pipeline (src/cmd/create.cpp) builds its own stages from
@@ -18,7 +20,11 @@
 namespace bk {
 
 struct Mutex {
+#if defined(__aarch64__)
+    alignas(8) u8 storage[48];
+#else
     alignas(8) u8 storage[40];
+#endif
     void init();
     void destroy();
     void lock();

@@ -26,15 +26,20 @@ BLAKE3  1.8.7  —  CC0-1.0 OR Apache-2.0 (OR Apache-2.0 WITH LLVM-exception);
     Upstream: https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.8.7.tar.gz
     sha256:   c6782a28842b1c0478524ac06a4f2ede784038ee298d6e2162c0b089c4306a3c
     Files:    blake3/{blake3.c,blake3.h,blake3_impl.h,blake3_dispatch.c,
-              blake3_portable.c,blake3_sse41.c,blake3_avx2.c,blake3_avx512.c}
-              from c/, plus LICENSE_A2, LICENSE_A2LLVM, LICENSE_CC0.
+              blake3_portable.c,blake3_sse41.c,blake3_avx2.c,blake3_avx512.c,
+              blake3_neon.c} from c/, plus LICENSE_A2, LICENSE_A2LLVM,
+              LICENSE_CC0.
     Target:   bk_blake3. Header confined to src/crypto/crypto.cpp.
-    Config:   BLAKE3_NO_SSE2 — bu refuses CPUs without AES-NI, and every
-              AES-NI CPU has SSE4.1, so the SSE2 variant could never be
-              dispatched to. The intrinsics files are compiled with -msse4.1,
+    Config:   The SIMD sources are selected per architecture (CMakeLists.txt).
+              x86-64: the SSE4.1/AVX2/AVX-512 kernels, compiled with -msse4.1,
               -mavx2 and -mavx512f -mavx512vl respectively; blake3_dispatch.c
-              picks one at run time from CPUID, as upstream intends. The
-              assembly variants are not used (the intrinsics files are the
+              picks one at run time from CPUID, as upstream intends.
+              BLAKE3_NO_SSE2 — bu refuses CPUs without AES-NI, and every AES-NI
+              CPU has SSE4.1, so the SSE2 variant could never be dispatched to.
+              aarch64: blake3_neon.c with BLAKE3_USE_NEON=1 (NEON is baseline,
+              so it needs no per-file target flag and is always used). The x86
+              intrinsics files are not compiled there. The assembly variants
+              are not used on either (the intrinsics/NEON files are the
               upstream-recommended portable-build path and LTO can see them).
     Why:      the fastest well-reviewed hash with a keyed mode (chunk IDs are a
               MAC of the content) and a derive_key mode (subkeys) in one
@@ -59,17 +64,23 @@ libsodium  1.0.22  —  ISC; the Argon2 files (argon2/) and the BLAKE2b
     sha256:   adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349
     Files (paths after "=" are upstream's, under src/libsodium/; every file
     is byte-identical to the release tarball's):
-      AES-256-GCM
-              libsodium/aead_aes256gcm_aesni.c
+      AES-256-GCM (one is compiled, chosen by architecture; both define the
+      same crypto_aead_aes256gcm_* symbols, each behind its own arch guard)
+              libsodium/aead_aes256gcm_aesni.c      (x86-64)
                 (= crypto_aead/aes256gcm/aesni/aead_aes256gcm_aesni.c)
+              libsodium/aead_aes256gcm_armcrypto.c  (aarch64)
+                (= crypto_aead/aes256gcm/armcrypto/aead_aes256gcm_armcrypto.c)
       Argon2id
               libsodium/argon2/{argon2.c,argon2.h,argon2-core.c,argon2-core.h,
                 argon2-encoding.c,argon2-encoding.h,argon2-fill-block-ref.c,
                 argon2-fill-block-ssse3.c,argon2-fill-block-avx2.c,
-                argon2-fill-block-avx512f.c,blake2b-long.c,blake2b-long.h,
+                argon2-fill-block-avx512f.c,argon2-fill-block-neon.c,
+                blake2b-long.c,blake2b-long.h,
                 blamka-round-ref.h,blamka-round-ssse3.h,blamka-round-avx2.h,
-                blamka-round-avx512f.h,pwhash_argon2id.c}
+                blamka-round-avx512f.h,blamka-round-neon.h,pwhash_argon2id.c}
                 (= crypto_pwhash/argon2/*)
+                The fill-block kernel is per architecture: ssse3/avx2/avx512f
+                on x86-64, neon on aarch64 (the ref kernel on both as fallback).
               libsodium/blake2b/{blake2b-ref.c,blake2b-compress-ref.c,blake2.h,
                 generichash_blake2b.c}
                 (= crypto_generichash/blake2b/ref/*)
@@ -92,28 +103,40 @@ libsodium  1.0.22  —  ISC; the Argon2 files (argon2/) and the BLAKE2b
                 machinery.
     Targets:  bk_aesgcm (AES-GCM + shim), bk_argon2 (Argon2id, runtime.c,
               codecs.c), bk_blake2b. Headers confined to src/crypto/crypto.cpp.
-    Config:   bk_aesgcm: CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1 HAVE_TMMINTRIN_H=1
-              HAVE_WMMINTRIN_H=1 HAVE_GCC_MEMORY_FENCES=1 — what libsodium's
-              configure would define on x86-64 Linux.
-              bk_argon2: the same base plus HAVE_{EMM,PMM,TMM,SMM,AVX,AVX2,
-              AVX512F,WMM}INTRIN_H, HAVE_CPUID, HAVE_AVX_ASM (runtime.c's
-              CPUID/XGETBV paths), HAVE_MMAP and HAVE_SYS_MMAN_H (the Argon2
+    Config:   The HAVE_* defines and the compiled sources are selected per
+              architecture (CMakeLists.txt); CONFIGURED=1, NATIVE_LITTLE_ENDIAN=1
+              and _GNU_SOURCE are common to all.
+              bk_aesgcm, x86-64: HAVE_TMMINTRIN_H=1 HAVE_WMMINTRIN_H=1
+              HAVE_GCC_MEMORY_FENCES=1 (what configure would define on x86-64
+              Linux), compiling aead_aes256gcm_aesni.c.
+              bk_aesgcm, aarch64: HAVE_ARMCRYPTO=1 HAVE_GCC_MEMORY_FENCES=1,
+              compiling aead_aes256gcm_armcrypto.c (its functions carry a
+              target("aes") attribute, so it needs no global -march).
+              bk_argon2: HAVE_MMAP and HAVE_SYS_MMAN_H on both (the Argon2
               matrix is an anonymous mapping, returned to the kernel by munmap).
-              The SSSE3/AVX2/AVX-512F fill-block files set their own target
-              pragmas; argon2-core.c picks one at run time, after
-              src/crypto/crypto.cpp has called _sodium_runtime_get_cpu_features
-              (what sodium_init would do).
+              x86-64 adds HAVE_{EMM,PMM,TMM,SMM,AVX,AVX2,AVX512F,WMM}INTRIN_H,
+              HAVE_CPUID and HAVE_AVX_ASM (runtime.c's CPUID/XGETBV paths) and
+              compiles the SSSE3/AVX2/AVX-512F fill-blocks; aarch64 defines none
+              of those and compiles the NEON fill-block. The fill-block files
+              set their own target pragmas; argon2-core.c selects one (x86-64 at
+              run time after src/crypto/crypto.cpp has called
+              _sodium_runtime_get_cpu_features, as sodium_init would;
+              unconditionally NEON on aarch64, where it is baseline).
               bk_blake2b: no SIMD defines, so only the portable BLAKE2b
               compression is compiled and dispatched to. Argon2 uses BLAKE2b
               for its first and last blocks only; the per-pass work is the
               fill-block kernel.
-    Why:      AES-256-GCM: a vetted, self-contained AES-256-GCM over AES-NI +
-              PCLMULQDQ (7 blocks in parallel with aggregated GHASH) by the
-              libsodium author, with runtime target attributes so it compiles
-              into a generic x86-64 binary. Needs AES-NI, PCLMULQDQ and AVX at
-              run time; src/crypto/crypto.cpp refuses other CPUs by name.
-              There is no VAES/VPCLMULQDQ (AVX-512 wide) path in this release;
-              see docs/design.md for what that would buy.
+    Why:      AES-256-GCM: a vetted, self-contained AES-256-GCM (several blocks
+              in parallel with aggregated GHASH) by the libsodium author, with
+              runtime target attributes so it compiles into a generic binary for
+              its ISA. x86-64 uses the AES-NI + PCLMULQDQ kernel (7-wide, needs
+              AES-NI, PCLMULQDQ and AVX); aarch64 uses the ARMv8 Crypto
+              Extensions kernel (6-wide, needs the AES and PMULL instructions).
+              Both define the same crypto_aead_aes256gcm_* public symbols behind
+              their own arch guard, so bu compiles exactly one and calls it with
+              no dispatch layer; src/crypto/crypto.cpp refuses a CPU without the
+              extensions by name. There is no VAES/VPCLMULQDQ (AVX-512 wide)
+              x86 path in this release; see docs/design.md for what it would buy.
               Argon2id: the memory-hard passphrase KDF of RFC 9106 (and of
               LUKS2), for the key file's passphrase slots. libsodium's copy is
               the reference implementation plus SIMD kernels, from the same

@@ -17,7 +17,12 @@ extern "C" {
 #include "sodium/runtime.h"
 }
 
+#if defined(__x86_64__)
 #include <cpuid.h>       // __get_cpuid: our own feature check, see cryptoCpuCheck
+#elif defined(__aarch64__)
+#include <asm/hwcap.h>   // HWCAP_AES, HWCAP_PMULL
+#include <sys/auxv.h>    // getauxval: our own feature check, see cryptoCpuCheck
+#endif
 #include <errno.h>
 #include <string.h>    // explicit_bzero, strerror
 #include <sys/random.h> // getrandom
@@ -30,6 +35,7 @@ static_assert(crypto_aead_aes256gcm_ABYTES == kTagBytes && crypto_aead_aes256gcm
 static_assert(BLAKE3_KEY_LEN == kKeyBytes, "BLAKE3 key size");
 static_assert(crypto_pwhash_argon2id_SALTBYTES == kKdfSaltBytes, "Argon2id salt size");
 
+#if defined(__x86_64__)
 bool cryptoCpuCheck(String& err) {
     // CPUID leaf 1, read directly. __builtin_cpu_supports would do the same
     // but links compiler-rt's __cpu_indicator_init (5.4 KB, a third of the
@@ -54,6 +60,28 @@ bool cryptoCpuCheck(String& err) {
     if (!avx) return errSet(err, "this CPU (or OS) lacks AVX, which bu's AES-256-GCM code path requires");
     return true;
 }
+#elif defined(__aarch64__)
+bool cryptoCpuCheck(String& err) {
+    // The aarch64 AES-256-GCM kernel needs the ARMv8 Crypto Extensions: AES
+    // (the AESE/AESMC instructions) and PMULL (the polynomial multiply GHASH
+    // uses). The kernel is built only from armv8-a NEON, with each function
+    // carrying a target("aes") attribute, so the binary runs on any armv8-a
+    // and the refusal here is what keeps a CPU without the extensions from
+    // executing an illegal instruction — the aarch64 twin of the x86-64 path.
+    // The hardware capabilities come from the auxiliary vector the kernel fills
+    // at exec, the same source libsodium's runtime.c reads. NEON (ASIMD) itself
+    // is mandatory in the aarch64 base ISA, so it is not checked.
+    const unsigned long hw = getauxval(AT_HWCAP);
+    if (!(hw & HWCAP_AES))
+        return errSet(err, "this CPU lacks the ARMv8 AES extension, which bu's AES-256-GCM "
+                           "requires (check the VM's CPU model)");
+    if (!(hw & HWCAP_PMULL))
+        return errSet(err, "this CPU lacks the ARMv8 PMULL extension, which bu's AES-256-GCM requires");
+    return true;
+}
+#else
+#error "bu supports x86_64 and aarch64 only"
+#endif
 
 BK_HOT void blake3Hash(const void* data, usize n, u8 out[32]) {
     blake3_hasher h;

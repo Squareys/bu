@@ -23,6 +23,24 @@ endif()
 option(BK_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 option(BK_TSAN "Build with ThreadSanitizer (the create pipeline and the thread pool)" OFF)
 
+# ----------------------------------------------------------- architecture --
+# bu runs on 64-bit little-endian Linux. Two instruction sets are supported,
+# and each selects a different set of vendored SIMD sources below: x86-64 uses
+# the AES-NI/PCLMUL AES-GCM, the SSE4.1/AVX2/AVX-512 BLAKE3 kernels and the
+# SSSE3/AVX2/AVX-512F Argon2 fill-blocks; aarch64 uses the ARMv8 Crypto
+# Extensions AES-GCM, the NEON BLAKE3 kernel and the NEON Argon2 fill-block.
+# The binary stays generic within its ISA: every SIMD function carries its own
+# target attribute, and src/crypto/crypto.cpp refuses a CPU without the
+# required extensions by name at startup (as on x86-64).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(BK_ARCH arm64)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    set(BK_ARCH x86_64)
+else()
+    message(FATAL_ERROR "bu supports x86_64 and aarch64; this is '${CMAKE_SYSTEM_PROCESSOR}'")
+endif()
+message(STATUS "bu architecture: ${BK_ARCH}")
+
 # ---------------------------------------------------------------- flags ----
 #
 # THE SIZE RULE (CONTRIBUTING.md): small by default, speed wins on hot paths. So the
@@ -90,61 +108,101 @@ if(BK_SANITIZE)
     set(BK_VENDOR_OPT -O1 -g)
 endif()
 
-# BLAKE3: portable + SSE4.1 + AVX2 + AVX-512, runtime dispatch kept. SSE2 is
-# compiled out: bu refuses CPUs without AES-NI, and every AES-NI CPU has
-# SSE4.1, so the SSE2 variant could never be selected.
+# BLAKE3: portable plus the SIMD kernels for the target ISA, runtime dispatch
+# kept (blake3_dispatch.c picks one from CPUID on x86-64; on aarch64 NEON is
+# baseline, so the dispatcher always uses it). On x86-64, SSE2 is compiled out:
+# bu refuses CPUs without AES-NI, and every AES-NI CPU has SSE4.1, so the SSE2
+# variant could never be selected. On aarch64 the NEON kernel is the only one
+# (the x86 intrinsics files are not compiled there at all).
 add_library(bk_blake3 OBJECT
     third_party/blake3/blake3.c
     third_party/blake3/blake3_dispatch.c
-    third_party/blake3/blake3_portable.c
-    third_party/blake3/blake3_sse41.c
-    third_party/blake3/blake3_avx2.c
-    third_party/blake3/blake3_avx512.c)
-target_compile_definitions(bk_blake3 PRIVATE BLAKE3_NO_SSE2)
+    third_party/blake3/blake3_portable.c)
+if(BK_ARCH STREQUAL x86_64)
+    target_sources(bk_blake3 PRIVATE
+        third_party/blake3/blake3_sse41.c
+        third_party/blake3/blake3_avx2.c
+        third_party/blake3/blake3_avx512.c)
+    target_compile_definitions(bk_blake3 PRIVATE BLAKE3_NO_SSE2)
+    set_source_files_properties(third_party/blake3/blake3_sse41.c PROPERTIES COMPILE_OPTIONS "-msse4.1")
+    set_source_files_properties(third_party/blake3/blake3_avx2.c PROPERTIES COMPILE_OPTIONS "-mavx2")
+    set_source_files_properties(third_party/blake3/blake3_avx512.c PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512vl")
+else()
+    # NEON is mandatory on aarch64, so its intrinsics compile with the default
+    # -march; the kernel needs no per-file target flag.
+    target_sources(bk_blake3 PRIVATE third_party/blake3/blake3_neon.c)
+    target_compile_definitions(bk_blake3 PRIVATE BLAKE3_USE_NEON=1)
+endif()
 target_compile_options(bk_blake3 PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
-set_source_files_properties(third_party/blake3/blake3_sse41.c PROPERTIES COMPILE_OPTIONS "-msse4.1")
-set_source_files_properties(third_party/blake3/blake3_avx2.c PROPERTIES COMPILE_OPTIONS "-mavx2")
-set_source_files_properties(third_party/blake3/blake3_avx512.c PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512vl")
 
 # LZ4 block format only (no frame, no HC).
 add_library(bk_lz4 OBJECT third_party/lz4/lz4.c)
 target_compile_options(bk_lz4 PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
 
-# libsodium: AES-256-GCM over AES-NI/PCLMUL (one file), plus a small shim for
-# the support symbols it and Argon2 reference (third_party/README).
+# libsodium: AES-256-GCM (one file), plus a small shim for the support symbols
+# it and Argon2 reference (third_party/README). The x86-64 file is the
+# AES-NI/PCLMUL implementation; the aarch64 file is the ARMv8 Crypto Extensions
+# (AES + PMULL) implementation. Both define the SAME crypto_aead_aes256gcm_*
+# public symbols, each behind its own arch guard, so exactly one is compiled
+# and bu's crypto.cpp calls them with no dispatch layer. The AES-GCM functions
+# carry their own target attributes, so the object is a generic binary for its
+# ISA; crypto.cpp refuses a CPU without the extensions before any call.
+if(BK_ARCH STREQUAL x86_64)
+    set(BK_AESGCM_SRC third_party/libsodium/aead_aes256gcm_aesni.c)
+    set(BK_AESGCM_DEFS HAVE_TMMINTRIN_H=1 HAVE_WMMINTRIN_H=1 HAVE_GCC_MEMORY_FENCES=1)
+else()
+    set(BK_AESGCM_SRC third_party/libsodium/aead_aes256gcm_armcrypto.c)
+    set(BK_AESGCM_DEFS HAVE_ARMCRYPTO=1 HAVE_GCC_MEMORY_FENCES=1)
+endif()
 add_library(bk_aesgcm OBJECT
-    third_party/libsodium/aead_aes256gcm_aesni.c
+    ${BK_AESGCM_SRC}
     third_party/libsodium/shim/sodium_shim.c)
 target_include_directories(bk_aesgcm PRIVATE third_party/libsodium/include/sodium)
 target_compile_definitions(bk_aesgcm PRIVATE CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1
-    HAVE_TMMINTRIN_H=1 HAVE_WMMINTRIN_H=1 HAVE_GCC_MEMORY_FENCES=1 _GNU_SOURCE)
+    ${BK_AESGCM_DEFS} _GNU_SOURCE)
 target_compile_options(bk_aesgcm PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
 
 # libsodium: Argon2id (crypto_pwhash_argon2id) for the key file's passphrase
-# slots. The fill-block kernels for SSSE3, AVX2 and AVX-512F carry their own
-# target pragmas and are picked at run time from runtime.c's CPUID answers, as
-# upstream does; the HAVE_* defines are what configure finds on x86-64 Linux.
-# HAVE_MMAP: the (up to GiB-sized) Argon2 matrix is an anonymous mapping that
-# munmap hands straight back to the kernel. codecs.c is there only because
-# argon2.c's encoded-string API references its base64 functions; bu never
-# calls that API and --gc-sections drops it.
+# slots. Its SIMD fill-block kernels carry their own target pragmas and are
+# selected at run time (the x86-64 ones from runtime.c's CPUID answers, as
+# upstream does; the NEON one unconditionally on aarch64). HAVE_MMAP: the (up
+# to GiB-sized) Argon2 matrix is an anonymous mapping that munmap hands
+# straight back to the kernel. codecs.c is there only because argon2.c's
+# encoded-string API references its base64 functions; bu never calls that API
+# and --gc-sections drops it.
+# The fill-block kernel is the per-pass work and is the one piece that is
+# SIMD per ISA: SSSE3/AVX2/AVX-512F on x86-64 (runtime.c's CPUID answers pick
+# one), the NEON kernel on aarch64 (NEON is baseline, so argon2-core.c selects
+# it with no runtime check). The reference kernel is compiled on both as the
+# fallback. The HAVE_*INTRIN_H defines are what libsodium's configure finds on
+# x86-64 Linux and gate the x86 fill-blocks; aarch64 defines none of them, so
+# argon2-core.c dispatches to the NEON kernel.
+if(BK_ARCH STREQUAL x86_64)
+    set(BK_ARGON2_SIMD
+        third_party/libsodium/argon2/argon2-fill-block-ssse3.c
+        third_party/libsodium/argon2/argon2-fill-block-avx2.c
+        third_party/libsodium/argon2/argon2-fill-block-avx512f.c)
+    set(BK_ARGON2_DEFS
+        HAVE_EMMINTRIN_H=1 HAVE_PMMINTRIN_H=1 HAVE_TMMINTRIN_H=1 HAVE_SMMINTRIN_H=1
+        HAVE_AVXINTRIN_H=1 HAVE_AVX2INTRIN_H=1 HAVE_AVX512FINTRIN_H=1 HAVE_WMMINTRIN_H=1
+        HAVE_CPUID=1 HAVE_AVX_ASM=1)
+else()
+    set(BK_ARGON2_SIMD third_party/libsodium/argon2/argon2-fill-block-neon.c)
+    set(BK_ARGON2_DEFS)
+endif()
 add_library(bk_argon2 OBJECT
     third_party/libsodium/argon2/argon2.c
     third_party/libsodium/argon2/argon2-core.c
     third_party/libsodium/argon2/argon2-encoding.c
     third_party/libsodium/argon2/argon2-fill-block-ref.c
-    third_party/libsodium/argon2/argon2-fill-block-ssse3.c
-    third_party/libsodium/argon2/argon2-fill-block-avx2.c
-    third_party/libsodium/argon2/argon2-fill-block-avx512f.c
+    ${BK_ARGON2_SIMD}
     third_party/libsodium/argon2/blake2b-long.c
     third_party/libsodium/argon2/pwhash_argon2id.c
     third_party/libsodium/runtime.c
     third_party/libsodium/codecs.c)
 target_include_directories(bk_argon2 PRIVATE third_party/libsodium/include/sodium)
 target_compile_definitions(bk_argon2 PRIVATE CONFIGURED=1 NATIVE_LITTLE_ENDIAN=1
-    HAVE_EMMINTRIN_H=1 HAVE_PMMINTRIN_H=1 HAVE_TMMINTRIN_H=1 HAVE_SMMINTRIN_H=1
-    HAVE_AVXINTRIN_H=1 HAVE_AVX2INTRIN_H=1 HAVE_AVX512FINTRIN_H=1 HAVE_WMMINTRIN_H=1
-    HAVE_CPUID=1 HAVE_AVX_ASM=1 HAVE_MMAP=1 HAVE_SYS_MMAN_H=1 _GNU_SOURCE)
+    ${BK_ARGON2_DEFS} HAVE_MMAP=1 HAVE_SYS_MMAN_H=1 _GNU_SOURCE)
 target_compile_options(bk_argon2 PRIVATE -w ${BK_VENDOR_OPT} ${BK_COMMON_FLAGS} ${BK_LTO_FLAGS})
 
 # libsodium: BLAKE2b, which Argon2 uses for its first and last block only, so

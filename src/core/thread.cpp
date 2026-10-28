@@ -11,7 +11,7 @@ namespace bk {
 
 static_assert(sizeof(pthread_mutex_t) <= sizeof(Mutex::storage), "Mutex storage too small");
 static_assert(sizeof(pthread_cond_t) <= sizeof(Cond::storage), "Cond storage too small");
-static_assert(sizeof(pthread_t) == sizeof(u64), "pthread_t is an integer on glibc x86-64");
+static_assert(sizeof(pthread_t) == sizeof(u64), "pthread_t is a pointer-sized integer on 64-bit glibc");
 
 static pthread_mutex_t* pm(Mutex* m) { return reinterpret_cast<pthread_mutex_t*>(m->storage); }
 static pthread_cond_t* pc(Cond* c) { return reinterpret_cast<pthread_cond_t*>(c->storage); }

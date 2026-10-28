@@ -3,9 +3,9 @@
 // Lowest-level header in the project; parsed by nearly every TU. It pulls in
 // *nothing* — not even the "freestanding" <cstdint>/<cstddef>. The fixed-width
 // and size types are available header-free as compiler builtin macros
-// (__UINT32_TYPE__ etc.), which gcc and clang both provide on our single
-// target (Linux x86-64). The static_asserts turn any wrong target into a loud
-// compile error rather than silent UB.
+// (__UINT32_TYPE__ etc.), which gcc and clang both provide on our targets
+// (64-bit little-endian Linux, x86-64 or aarch64). The static_asserts turn any
+// wrong target into a loud compile error rather than silent UB.
 //
 // Keep this header tiny: every byte added here is paid for across the whole
 // translation-unit graph.
@@ -29,7 +29,7 @@ using uptr  = __UINTPTR_TYPE__;
 static_assert(sizeof(u8) == 1 && sizeof(u16) == 2 && sizeof(u32) == 4 && sizeof(u64) == 8,
               "unexpected fixed-width integer sizes — wrong compiler/target?");
 static_assert(sizeof(usize) == 8 && sizeof(uptr) == 8,
-              "bu targets 64-bit Linux x86-64 only");
+              "bu targets 64-bit Linux (x86-64 or aarch64) only");
 
 // Sentinel for "no index" in the data-oriented arrays. We use index-based
 // references everywhere instead of pointers (pointers are unstable across
