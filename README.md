@@ -5,14 +5,16 @@
 **Encrypted, deduplicating, incremental backups in one chain file.**
 
 bu is a lightweight take on what BorgBackup does, in one small native binary
-(~270 KB stripped, Linux x86-64). A full backup and its increments belong
+(Linux x86-64 or aarch64; ~270 KB stripped on x86-64, ~190 KB on aarch64). A
+full backup and its increments belong
 together, so they live in one file, the **chain**: `bu create` writes a full
 backup into a new chain and appends an increment to an existing one. bu has
 no repository directory, no server and no network code. It works through
 file descriptors, so a chain can sit on a local disk or a network mount
 (NFS, SMB, sshfs, S3 through `rclone mount`), or travel through a pipe.
 
-- **Encrypted and authenticated.** AES-256-GCM (AES-NI) under a fresh key per
+- **Encrypted and authenticated.** AES-256-GCM, hardware-accelerated (AES-NI
+  on x86-64, the ARMv8 Crypto Extensions on aarch64), under a fresh key per
   segment. bu encrypts file names, sizes, timestamps and the directory tree.
 - **Deduplicated.** FastCDC content-defined chunking (~20 KiB average) with
   keyed-BLAKE3 chunk IDs: after an edit or an insertion, bu stores the chunks
@@ -472,9 +474,11 @@ when run as root; otherwise everything belongs to whoever restores it.
 - Making a live database consistent: give bu a consistent copy.
 - More than ~140 million new chunks (~2.8 TB of unique data) in one
   segment; split larger first backups by directory.
-- Platforms other than Linux x86-64, and, for encrypted chains, CPUs without
-  AES-NI, PCLMULQDQ and AVX (x86-64 CPUs since ~2011 have them; bu names the
-  missing feature).
+- Platforms other than 64-bit Linux (x86-64 and aarch64), and, for encrypted
+  chains, CPUs without the hardware AES and carry-less-multiply extensions:
+  AES-NI, PCLMULQDQ and AVX on x86-64 (CPUs since ~2011 have them), or the
+  ARMv8 Crypto Extensions (AES and PMULL) on aarch64. bu names the missing
+  feature at startup. Unencrypted chains (`--no-key`) need none of these.
 
 bu forgets chunks that only older snapshots reference: if you delete a file
 and it reappears two increments later, bu stores it again. That keeps the
@@ -500,13 +504,13 @@ scripts/bench_io.sh --src DIR --dst DIR   # against the disk (docs/benchmarks.md
 The build directory lives outside the tree, in
 `~/.cache/bu-build-<config>-<hash>` (or under `$BU_BUILD_ROOT`). bu has no
 install step: copy `bu` wherever you like. Each
-[GitHub release](https://github.com/Squareys/bu/releases) also has a
-stripped Linux x86-64 binary with its SHA-256 checksum. The integration
-tests generate test data with `openssl` and skip the SQLite test without
-the `sqlite3` CLI.
+[GitHub release](https://github.com/Squareys/bu/releases) also has a stripped
+binary for Linux x86-64 and for Linux aarch64, each with its SHA-256
+checksum. The integration tests generate test data with `openssl` and skip
+the SQLite test without the `sqlite3` CLI.
 CI (GitHub Actions, `.github/workflows/ci.yml`) runs the smoke tests and
 the size report on a Release build, the full suite, and the full suite
-under `--asan` and `--tsan`.
+under `--asan` and `--tsan` — on both x86-64 and aarch64 runners.
 
 ## Documentation
 

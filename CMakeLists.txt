@@ -2,7 +2,7 @@
 # as one small native binary. Linux x86-64, clang, no STL in our own code (see
 # CONTRIBUTING.md), no exceptions, no RTTI.
 cmake_minimum_required(VERSION 3.20)
-project(bu VERSION 0.2.0 LANGUAGES C CXX)
+project(bu VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)

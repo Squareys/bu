@@ -363,3 +363,22 @@ scripts/bench_io.sh --src /tmp --dst /tmp                   # CPU cap
 The script checks free space first (source + backup + restored copy on the
 destination, everything on one file system when they share one), cleans up
 after itself, and needs GNU time, `cc`, python3 and openssl.
+
+## aarch64 (primitive throughput)
+
+These are the CPU-primitive numbers from `bu_bench` (design.md §9) on aarch64,
+to show the ARMv8-crypto AES-GCM and NEON BLAKE3 paths carry real speed rather
+than a software fallback. The machine is an **Apple M1 under Colima, i.e. a VM**
+(one thread, 16 KiB chunks), so treat these as directional, not as a bare-metal
+result; the x86-64 figures in design.md §9 are the primary reference.
+
+| Primitive, one thread, 16 KiB chunks | MiB/s |
+|---|---|
+| BLAKE3 keyed (NEON) | ~1 720 |
+| AES-256-GCM seal / open (ARMv8 Crypto Extensions) | ~5 260 / ~5 100 |
+| LZ4 compress, random / text (3.4x) | ~9 370 / ~1 150 |
+| LZ4 decompress, text | ~5 610 |
+| FastCDC one pass / scan + select | ~1 860 / ~1 410 |
+
+AES-256-GCM clears 5 GB/s per core, so the cipher is not the bottleneck behind
+disk or network here either.

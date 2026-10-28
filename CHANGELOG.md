@@ -7,6 +7,28 @@ own version number (docs/format.md); a release that changes it says so.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-28
+
+Chain and key file formats unchanged (chain format version 2, key file
+format version 2): chains and key files are byte-identical across
+architectures, so a backup made on one restores on the other.
+
+### Added
+- **Linux aarch64 (ARM64) support.** bu now builds and runs on 64-bit ARM
+  with the same one-binary, no-STL design as x86-64. The crypto uses the
+  ARMv8 Crypto Extensions: AES-256-GCM over the AES and PMULL instructions,
+  BLAKE3 over NEON, and the NEON Argon2 fill-block. The binary stays generic
+  within the ISA (each kernel carries its own target attribute) and refuses a
+  CPU without the AES and PMULL extensions by name at startup, exactly as the
+  x86-64 build refuses one without AES-NI, PCLMUL and AVX. x86-64 is
+  unchanged.
+- CI builds, tests and sanitizes (ASan/UBSan, TSan) on both architectures;
+  release builds and publishes `bu-X.Y.Z-linux-x86_64` and
+  `bu-X.Y.Z-linux-aarch64`, each with its `.sha256`.
+- An integration test restores a chain written by an x86-64 build and checks
+  it against a committed manifest, proving the on-disk format is identical
+  across architectures.
+
 ## [0.2.0] - 2026-10-28
 
 Chain and key file formats unchanged (chain format version 2, key file
@@ -88,6 +110,7 @@ Initial release. Chain file format version 2, key file format version 2.
   ASan/UBSan and TSan runs, benchmarks (`scripts/bench.sh`,
   `scripts/bench_io.sh`).
 
-[Unreleased]: https://github.com/Squareys/bu/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Squareys/bu/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Squareys/bu/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Squareys/bu/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Squareys/bu/releases/tag/v0.1.0

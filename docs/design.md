@@ -188,27 +188,37 @@ be corrupt in ways no backup tool can see).
 
 | Purpose | Primitive | Implementation |
 |---|---|---|
-| chunk IDs, subkeys, header check | BLAKE3 (keyed, derive_key) | official C, SSE4.1/AVX2/AVX-512, runtime dispatch |
-| encryption + authentication | AES-256-GCM | libsodium's AES-NI + PCLMULQDQ implementation |
-| compression | LZ4 block | official lz4.c |
-| passphrase stretching (key file) | Argon2id (RFC 9106) | libsodium's, SSSE3/AVX2/AVX-512F, runtime dispatch |
+| chunk IDs, subkeys, header check | BLAKE3 (keyed, derive_key) | official C; x86-64 SSE4.1/AVX2/AVX-512 (runtime dispatch), aarch64 NEON |
+| encryption + authentication | AES-256-GCM | libsodium; x86-64 AES-NI + PCLMULQDQ, aarch64 ARMv8 Crypto Extensions (AES + PMULL) |
+| compression | LZ4 block | official lz4.c (portable) |
+| passphrase stretching (key file) | Argon2id (RFC 9106) | libsodium; x86-64 SSSE3/AVX2/AVX-512F (runtime dispatch), aarch64 NEON |
 | randomness | `getrandom(2)` | kernel |
+
+The implementation is selected per architecture at build time (CMakeLists.txt):
+each kernel is compiled from its own ISA's intrinsics with a per-function
+target attribute, so the binary runs on any CPU of that ISA and the CPU check
+below is what gates the extensions. The two builds produce byte-identical
+chains (the primitives are standardised and the on-disk format is explicit
+little-endian), so a backup made on one restores on the other.
 
 **Why BLAKE3:** one primitive with a keyed mode (chunk IDs as a MAC, like
 Borg's keyed ID hash) and a key-derivation mode, faster than SHA-256 even with
 SHA extensions, and SIMD-parallel inside a single 16 KiB input.
 
-**Why AES-256-GCM:** every x86-64 CPU since about 2011 accelerates it (6.4 GB/s
-per core here, see §9), it is the most scrutinised AEAD there is, and
-libsodium's AES-NI implementation is self-contained, runtime-targeted and
-written by people who do this for a living. It needs AES-NI, PCLMULQDQ and AVX;
-bu checks CPUID itself and refuses other CPUs by name rather than ship a
-slow, rarely exercised software fallback. (This libsodium release has no
+**Why AES-256-GCM:** every x86-64 CPU since about 2011 and every 64-bit ARM
+core with the (near-universal) Crypto Extensions accelerate it (6.4 GB/s per
+core on the x86-64 reference machine, see §9), it is the most scrutinised AEAD
+there is, and libsodium's hardware implementations are self-contained,
+runtime-targeted and written by people who do this for a living. It needs
+AES-NI, PCLMULQDQ and AVX on x86-64, or the ARMv8 AES and PMULL instructions on
+aarch64; bu reads the hardware capabilities itself (CPUID on x86-64, the
+auxiliary vector's HWCAP on aarch64) and refuses other CPUs by name rather than
+ship a slow, rarely exercised software fallback. (This libsodium release has no
 VAES/VPCLMULQDQ wide path; on CPUs that have it, a 4-block-wide GHASH would
 roughly double AES-GCM throughput, which is not the bottleneck today.)
 ChaCha20-Poly1305 as a fallback was considered and left out: it would add a
-second cipher, a second code path to test, and a format flag, for CPUs over a
-decade old.
+second cipher, a second code path to test, and a format flag, for CPUs that
+predate hardware AES.
 
 Known-answer tests cover both: BLAKE3's official vectors in all three modes
 at lengths that hit every SIMD path, and GCM test cases 13–16 from the GCM
@@ -767,6 +777,11 @@ glibc, clang 23, LTO). By component (symbol sizes, text + rodata):
 The remaining ~21 KB of the file are ELF headers, dynamic-linking tables
 (`.dynsym`, `.dynstr`, relocations for the ~90 glibc symbols used) and
 section alignment.
+
+The aarch64 binary is smaller, **~190 KB stripped**: it carries one NEON
+BLAKE3 kernel instead of the three x86 ones, the NEON Argon2 fill-block
+instead of three, and the ARMv8 AES-GCM. The cold path (the bulk of the
+binary) is the same C++ compiled for the other ISA.
 
 The passphrase key file (§3) added 56 KB: 32 KB of Argon2id and BLAKE2b and
 18 KB of key-file, passphrase and `bu key` code and help text. The Argon2
